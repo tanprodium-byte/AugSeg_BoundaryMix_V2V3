@@ -168,12 +168,17 @@ def cut_mix_label_adaptive_with_mask(
     labeled_image,
     labeled_mask,
     lst_confidences,
+    return_target_metadata=False,
 ):
     assert len(lst_confidences) == len(unlabeled_image), "Ensure the confidence is properly obtained"
     assert labeled_image.shape == unlabeled_image.shape, "Ensure shape match between lb and unlb"
     mix_unlabeled_image = unlabeled_image.clone()
     mix_unlabeled_target = unlabeled_mask.clone()
     mix_unlabeled_logits = unlabeled_logits.clone()
+    target_component_mask = unlabeled_mask.clone()
+    target_component_logits = unlabeled_logits.clone()
+    mix_target_component_mask = target_component_mask.clone()
+    mix_target_component_logits = target_component_logits.clone()
     mix_source_mask = torch.zeros_like(unlabeled_mask, dtype=torch.float32)
     source_mask = torch.zeros_like(unlabeled_mask, dtype=torch.float32)
     labeled_logits = torch.ones_like(labeled_mask)
@@ -212,9 +217,20 @@ def cut_mix_label_adaptive_with_mask(
             mix_unlabeled_logits[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
         )
 
+        target_component_mask[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
+            mix_target_component_mask[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
+        )
+
+        target_component_logits[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
+            mix_target_component_logits[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
+        )
+
         source_mask[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
             mix_source_mask[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
         )
+
+    if return_target_metadata:
+        return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, target_component_mask, target_component_logits
 
     return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask
 

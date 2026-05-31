@@ -27,6 +27,7 @@ from util.boundary_mix import (
     cut_mix_label_adaptive_with_mask,
     thresholded_boundary_mix_loss,
 )
+from util.boundary_component import compute_component_weights
 from tools.visualize_boundary_mix_debug import save_boundary_mix_debug
 from util.run_logging import (
     get_or_create_run_id,
@@ -337,6 +338,25 @@ def main(in_args):
     cfg["boundary_mix"].setdefault("vis_debug", False)
     cfg["boundary_mix"].setdefault("vis_dir", "exp_boundary_debug_vis")
     cfg["boundary_mix"].setdefault("vis_max_batches", 2)
+
+    cfg.setdefault("boundary_component", {})
+    cfg["boundary_component"].setdefault("enabled", False)
+    cfg["boundary_component"].setdefault("connectivity", 8)
+    cfg["boundary_component"].setdefault("apply_to", "target_only")
+    cfg["boundary_component"].setdefault("foreground_only", True)
+    cfg["boundary_component"].setdefault("tau_visible_low", 0.2)
+    cfg["boundary_component"].setdefault("tau_visible_high", 0.6)
+    cfg["boundary_component"].setdefault("area_min", 64)
+    cfg["boundary_component"].setdefault("area_max", 512)
+    cfg["boundary_component"].setdefault("use_mean_confidence_in_q", True)
+    cfg["boundary_component"].setdefault("base_pixel_weight", "one")
+    cfg["boundary_component"].setdefault("weight_mode", "soft")
+    cfg["boundary_component"].setdefault("force_q_one", False)
+    cfg["boundary_component"].setdefault("eps", 1e-6)
+    cfg["boundary_component"].setdefault("debug_log", False)
+
+    cfg.setdefault("boundary_compatibility", {})
+    cfg["boundary_compatibility"].setdefault("enabled", False)
     
     if not os.path.exists(cfg["log_path"]) and rank == 0:
         os.makedirs(cfg["log_path"])
@@ -780,6 +800,9 @@ def train(
     boundary_mix_debug_enabled = bool(boundary_mix_cfg.get("debug", False))
     boundary_mix_vis_enabled = bool(boundary_mix_cfg.get("vis_debug", False))
     boundary_mix_vis_saved = 0
+    boundary_component_cfg = cfg.get("boundary_component", {})
+    boundary_component_enabled = bool(boundary_component_cfg.get("enabled", False))
+    boundary_component_debug_enabled = bool(boundary_component_cfg.get("debug_log", False))
     model.train()
     
     # data loader
@@ -905,17 +928,33 @@ def train(
             ar_applied = int(ar_triggered and use_cutmix)
 
             mix_source_mask = None
+            target_component_label = None
+            target_component_confidence = None
             if ar_applied:
                 # estimate area ratio CHỈ để log -> chỉ tính khi do_log_now
                 label_u_before = None
                 if do_log_now:
                     label_u_before = label_u_aug.clone()                    
 
-                if boundary_mix_enabled:
-                    image_u_aug, label_u_aug, logits_u_aug, mix_source_mask = cut_mix_label_adaptive_with_mask(
-                        image_u_aug, label_u_aug, logits_u_aug,
-                        image_l, label_l, confidence
-                    )
+                if boundary_mix_enabled or boundary_component_enabled:
+                    if boundary_component_enabled:
+                        (
+                            image_u_aug,
+                            label_u_aug,
+                            logits_u_aug,
+                            mix_source_mask,
+                            target_component_label,
+                            target_component_confidence,
+                        ) = cut_mix_label_adaptive_with_mask(
+                            image_u_aug, label_u_aug, logits_u_aug,
+                            image_l, label_l, confidence,
+                            return_target_metadata=True,
+                        )
+                    else:
+                        image_u_aug, label_u_aug, logits_u_aug, mix_source_mask = cut_mix_label_adaptive_with_mask(
+                            image_u_aug, label_u_aug, logits_u_aug,
+                            image_l, label_l, confidence
+                        )
                 elif cfg["trainer"]["unsupervised"].get("use_cutmix_adaptive", False):                                    
                     image_u_aug, label_u_aug, logits_u_aug = cut_mix_label_adaptive(
                         image_u_aug, label_u_aug, logits_u_aug,
@@ -985,7 +1024,90 @@ def train(
                 sup_loss = sup_loss_fn(pred_l, label_l)
 
             # 5. unsupervised loss
-            if boundary_mix_enabled and mix_source_mask is not None:
+            if boundary_component_enabled and mix_source_mask is not None:
+                component_eps = float(boundary_component_cfg.get("eps", 1e-6))
+                if target_component_label is None:
+                    target_component_label = label_u_aug
+                if target_component_confidence is None:
+                    target_component_confidence = logits_u_aug
+
+                component_weight, component_stats = compute_component_weights(
+                    target_component_label.detach(),
+                    target_component_confidence.detach(),
+                    mix_source_mask.detach(),
+                    ignore_index=ignore,
+                    num_classes=cfg["net"]["num_classes"],
+                    connectivity=int(boundary_component_cfg.get("connectivity", 8)),
+                    apply_to=boundary_component_cfg.get("apply_to", "target_only"),
+                    foreground_only=bool(boundary_component_cfg.get("foreground_only", True)),
+                    tau_visible_low=float(boundary_component_cfg.get("tau_visible_low", 0.2)),
+                    tau_visible_high=float(boundary_component_cfg.get("tau_visible_high", 0.6)),
+                    area_min=float(boundary_component_cfg.get("area_min", 64)),
+                    area_max=float(boundary_component_cfg.get("area_max", 512)),
+                    use_mean_confidence_in_q=bool(boundary_component_cfg.get("use_mean_confidence_in_q", True)),
+                    base_pixel_weight=boundary_component_cfg.get("base_pixel_weight", "one"),
+                    weight_mode=boundary_component_cfg.get("weight_mode", "soft"),
+                    force_q_one=bool(boundary_component_cfg.get("force_q_one", False)),
+                    eps=component_eps,
+                )
+                valid = logits_u_aug.detach().ge(p_threshold).bool() & label_u_aug.detach().ne(ignore).bool()
+                component_target = label_u_aug.detach().clone()
+                component_target[~valid] = ignore
+                component_weight = component_weight.to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
+                component_weight = component_weight * valid.to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
+                weighted_loss_denominator = component_weight.sum().clamp_min(component_eps)
+                component_ce = F.cross_entropy(
+                    pred_u_strong,
+                    component_target,
+                    ignore_index=ignore,
+                    reduction="none",
+                )
+                unsup_loss = (component_ce * component_weight).sum() / weighted_loss_denominator
+                pseduo_high_ratio = valid.float().mean()
+
+                do_component_debug = (
+                    rank == 0
+                    and boundary_component_debug_enabled
+                    and (
+                        step < int(boundary_component_cfg.get("debug_first_batches", 3))
+                        or do_log_now
+                    )
+                )
+                if do_component_debug:
+                    per_class_count = component_stats.get("per_class_affected_component_count", {})
+                    per_class_q = component_stats.get("per_class_mean_q_C", {})
+                    logger.info(
+                        "[boundary_component] epoch=%d step=%d global_iter=%d "
+                        "num_affected_components=%d num_affected_pixels=%d "
+                        "visible_ratio_mean=%.4f visible_ratio_std=%.4f visible_ratio_min=%.4f visible_ratio_max=%.4f "
+                        "visible_area_mean=%.4f visible_area_std=%.4f visible_area_min=%.4f visible_area_max=%.4f "
+                        "mean_confidence_R_C=%.4f q_C_mean=%.4f q_C_std=%.4f q_C_min=%.4f q_C_max=%.4f "
+                        "weighted_loss_denominator=%.4f per_class_count=%s per_class_mean_q=%s"
+                        % (
+                            epoch,
+                            step,
+                            i_iter,
+                            component_stats["num_affected_components"],
+                            component_stats["num_affected_pixels"],
+                            component_stats["visible_ratio_mean"],
+                            component_stats["visible_ratio_std"],
+                            component_stats["visible_ratio_min"],
+                            component_stats["visible_ratio_max"],
+                            component_stats["visible_area_mean"],
+                            component_stats["visible_area_std"],
+                            component_stats["visible_area_min"],
+                            component_stats["visible_area_max"],
+                            component_stats["mean_confidence_R_C"],
+                            component_stats["q_C_mean"],
+                            component_stats["q_C_std"],
+                            component_stats["q_C_min"],
+                            component_stats["q_C_max"],
+                            float(weighted_loss_denominator.detach().item()),
+                            per_class_count,
+                            per_class_q,
+                        )
+                    )
+            elif boundary_mix_enabled and mix_source_mask is not None:
                 boundary_mix_kernel_size = int(boundary_mix_cfg.get("kernel_size", 5))
                 boundary_mix_gamma_in = float(boundary_mix_cfg.get("gamma_in", 0.7))
                 boundary_mix_gamma_out = float(boundary_mix_cfg.get("gamma_out", 0.3))
