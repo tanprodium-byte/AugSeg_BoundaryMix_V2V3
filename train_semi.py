@@ -1117,8 +1117,8 @@ def train(
                 component_target = label_u_aug.detach().clone()
                 component_target[~valid] = ignore
                 component_weight = component_weight.to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
-                component_weight = component_weight * valid.to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
                 component_weight_for_bcr = component_weight.detach()
+                component_weight = component_weight * valid.to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
                 weighted_loss_denominator = component_weight.sum().clamp_min(component_eps)
                 component_ce = F.cross_entropy(
                     pred_u_strong,
@@ -1267,7 +1267,10 @@ def train(
                     raise ValueError("boundary_compatibility.semantic_metric currently supports 'js' only")
                 if boundary_compatibility_cfg.get("feature_layer", "decoder") != "decoder":
                     raise ValueError("boundary_compatibility.feature_layer currently supports 'decoder' only")
-                use_component_gate = bool(boundary_compatibility_cfg.get("use_component_gate", False))
+                use_component_gate = (
+                    boundary_component_enabled
+                    and bool(boundary_compatibility_cfg.get("use_component_gate", False))
+                )
                 bcr_loss, bcr_stats = compute_js_boundary_compatibility_loss(
                     decoder_features_u_strong,
                     label_u_aug.detach(),
