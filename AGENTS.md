@@ -42,8 +42,8 @@ Add separate modules if possible:
 
 Preferred functions:
 
-compute_component_weights(...)
-compute_js_boundary_compatibility_loss(...)
+- compute_component_weights(...)
+- compute_js_boundary_compatibility_loss(...)
 
 ## Required configs
 
@@ -58,6 +58,7 @@ Add configs for:
 ## Validation before final answer
 
 Before finishing, report:
+
 - files changed
 - exact config files added
 - how disabled modules preserve baseline/A1 behavior
