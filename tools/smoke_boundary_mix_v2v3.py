@@ -10,6 +10,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from util.boundary_component import compute_component_weights
+from util.boundary_compatibility import compute_js_boundary_compatibility_loss
 
 
 def _weighted_ce_denominator(weight, target, ignore_index=255, eps=1e-6):
@@ -98,11 +99,170 @@ def test_force_q_one_is_neutral_and_denominator_nonzero():
     assert float(denom.item()) > 0.0
 
 
+def _base_v3_inputs(num_classes=3):
+    features = torch.zeros((1, 4, 8, 8), dtype=torch.float32)
+    features[:, 0, :, :4] = 1.0
+    features[:, 0, :, 4:] = 1.0
+    target = torch.zeros((1, 8, 8), dtype=torch.long)
+    target[:, :, :4] = 1
+    target[:, :, 4:] = 1
+    teacher_probs = F.one_hot(target, num_classes=num_classes).permute(0, 3, 1, 2).float()
+    confidence = torch.ones((1, 8, 8), dtype=torch.float32)
+    mix_mask = torch.zeros((1, 8, 8), dtype=torch.float32)
+    mix_mask[:, :, :4] = 1.0
+    return features, target, teacher_probs, confidence, mix_mask
+
+
+def test_v3_js_finite_with_zero_probabilities():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    teacher_probs.zero_()
+    teacher_probs[:, 1, :, 4:] = 1.0e-12
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=32,
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["num_pairs_per_image"] > 0
+    assert stats["mean_JS"] >= 0.0
+
+
+def test_v3_same_semantic_pairs_produce_valid_same_loss():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    features[:, 1, :, 4:] = 1.0
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["same_pairs_ratio"] > 0.0
+    assert stats["diff_pairs_ratio"] == 0.0
+    assert loss.item() >= 0.0
+
+
+def test_v3_different_semantic_pairs_produce_valid_diff_loss():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    target[:, :, 4:] = 2
+    teacher_probs = F.one_hot(target, num_classes=3).permute(0, 3, 1, 2).float()
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+        margin=0.4,
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["diff_pairs_ratio"] > 0.0
+    assert loss.item() > 0.0
+
+
+def test_v3_uncertain_pairs_are_ignored():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs(num_classes=2)
+    target[:, :, :4] = 0
+    teacher_probs = torch.zeros((1, 2, 8, 8), dtype=torch.float32)
+    teacher_probs[:, 0, :, 4:] = 0.2
+    teacher_probs[:, 1, :, 4:] = 0.8
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        num_classes=2,
+        pair_radius=1,
+        max_pairs_per_image=64,
+        tau_same=0.8,
+        tau_diff=0.3,
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["uncertain_pairs_ratio"] > 0.0
+    assert loss.item() == 0.0
+
+
+def test_v3_pair_count_is_capped():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        num_classes=3,
+        pair_radius=3,
+        max_pairs_per_image=5,
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["num_pairs_per_image"] <= 5.0
+
+
+def test_v3_standalone_does_not_use_component_q_c():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    component_weight = torch.zeros_like(confidence)
+
+    loss_without_q, _ = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        component_weight_map_or_none=None,
+        use_component_gate=False,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+    loss_with_ignored_q, _ = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        component_weight_map_or_none=component_weight,
+        use_component_gate=False,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+
+    assert torch.allclose(loss_without_q, loss_with_ignored_q)
+
+
 def main():
     test_no_affected_component_returns_base_weight()
     test_affected_target_component_gets_soft_q_below_one()
     test_force_q_one_is_neutral_and_denominator_nonzero()
-    print("BoundaryMix V2 smoke tests passed.")
+    test_v3_js_finite_with_zero_probabilities()
+    test_v3_same_semantic_pairs_produce_valid_same_loss()
+    test_v3_different_semantic_pairs_produce_valid_diff_loss()
+    test_v3_uncertain_pairs_are_ignored()
+    test_v3_pair_count_is_capped()
+    test_v3_standalone_does_not_use_component_q_c()
+    print("BoundaryMix V2/V3 smoke tests passed.")
 
 
 if __name__ == "__main__":

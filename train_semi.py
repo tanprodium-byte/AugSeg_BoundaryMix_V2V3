@@ -28,6 +28,7 @@ from util.boundary_mix import (
     thresholded_boundary_mix_loss,
 )
 from util.boundary_component import compute_component_weights
+from util.boundary_compatibility import compute_js_boundary_compatibility_loss
 from tools.visualize_boundary_mix_debug import save_boundary_mix_debug
 from util.run_logging import (
     get_or_create_run_id,
@@ -357,6 +358,23 @@ def main(in_args):
 
     cfg.setdefault("boundary_compatibility", {})
     cfg["boundary_compatibility"].setdefault("enabled", False)
+    cfg["boundary_compatibility"].setdefault("semantic_metric", "js")
+    cfg["boundary_compatibility"].setdefault("band_width", 3)
+    cfg["boundary_compatibility"].setdefault("pair_mode", "radius")
+    cfg["boundary_compatibility"].setdefault("pair_radius", 1)
+    cfg["boundary_compatibility"].setdefault("topk", 5)
+    cfg["boundary_compatibility"].setdefault("max_pairs_per_image", 2048)
+    cfg["boundary_compatibility"].setdefault("tau_same", 0.8)
+    cfg["boundary_compatibility"].setdefault("tau_diff", 0.3)
+    cfg["boundary_compatibility"].setdefault("margin", 0.4)
+    cfg["boundary_compatibility"].setdefault("lambda_bcr", 0.01)
+    cfg["boundary_compatibility"].setdefault("use_confidence_gate", True)
+    cfg["boundary_compatibility"].setdefault("use_component_gate", False)
+    cfg["boundary_compatibility"].setdefault("feature_layer", "decoder")
+    cfg["boundary_compatibility"].setdefault("detach_teacher_distribution", True)
+    cfg["boundary_compatibility"].setdefault("detach_gate", True)
+    cfg["boundary_compatibility"].setdefault("eps", 1e-6)
+    cfg["boundary_compatibility"].setdefault("debug_log", False)
     
     if not os.path.exists(cfg["log_path"]) and rank == 0:
         os.makedirs(cfg["log_path"])
@@ -803,6 +821,9 @@ def train(
     boundary_component_cfg = cfg.get("boundary_component", {})
     boundary_component_enabled = bool(boundary_component_cfg.get("enabled", False))
     boundary_component_debug_enabled = bool(boundary_component_cfg.get("debug_log", False))
+    boundary_compatibility_cfg = cfg.get("boundary_compatibility", {})
+    boundary_compatibility_enabled = bool(boundary_compatibility_cfg.get("enabled", False))
+    boundary_compatibility_debug_enabled = bool(boundary_compatibility_cfg.get("debug_log", False))
     model.train()
     
     # data loader
@@ -840,6 +861,7 @@ def train(
         u_maxprob_p50 = float("nan")
         u_maxprob_p90 = float("nan")
         u_pseudo_ratio_mean = float("nan")
+        bcr_loss = None
 
         i_iter = epoch * len(loader_l) + step # total iters till now
         # log schedule (đúng y hệt block W&B phía dưới)
@@ -898,10 +920,13 @@ def train(
         else:
             # 1. generate pseudo labels
             p_threshold = cfg["trainer"]["unsupervised"].get("threshold", 0.95)
+            teacher_probs_u_aug = None
             with torch.no_grad():
                 model_teacher.eval()
                 pred_u, _ = model_teacher(image_u_weak.detach())
                 pred_u = F.softmax(pred_u, dim=1)
+                if boundary_compatibility_enabled:
+                    teacher_probs_u_aug = pred_u.detach().clone()
                 # obtain pseudos
                 logits_u_aug, label_u_aug = torch.max(pred_u, dim=1)
                 
@@ -936,25 +961,43 @@ def train(
                 if do_log_now:
                     label_u_before = label_u_aug.clone()                    
 
-                if boundary_mix_enabled or boundary_component_enabled:
+                if boundary_mix_enabled or boundary_component_enabled or boundary_compatibility_enabled:
                     if boundary_component_enabled:
-                        (
-                            image_u_aug,
-                            label_u_aug,
-                            logits_u_aug,
-                            mix_source_mask,
-                            target_component_label,
-                            target_component_confidence,
-                        ) = cut_mix_label_adaptive_with_mask(
+                        mixed_result = cut_mix_label_adaptive_with_mask(
                             image_u_aug, label_u_aug, logits_u_aug,
                             image_l, label_l, confidence,
                             return_target_metadata=True,
+                            unlabeled_probs=teacher_probs_u_aug,
                         )
+                        if boundary_compatibility_enabled:
+                            (
+                                image_u_aug,
+                                label_u_aug,
+                                logits_u_aug,
+                                mix_source_mask,
+                                target_component_label,
+                                target_component_confidence,
+                                teacher_probs_u_aug,
+                            ) = mixed_result
+                        else:
+                            (
+                                image_u_aug,
+                                label_u_aug,
+                                logits_u_aug,
+                                mix_source_mask,
+                                target_component_label,
+                                target_component_confidence,
+                            ) = mixed_result
                     else:
-                        image_u_aug, label_u_aug, logits_u_aug, mix_source_mask = cut_mix_label_adaptive_with_mask(
+                        mixed_result = cut_mix_label_adaptive_with_mask(
                             image_u_aug, label_u_aug, logits_u_aug,
-                            image_l, label_l, confidence
+                            image_l, label_l, confidence,
+                            unlabeled_probs=teacher_probs_u_aug,
                         )
+                        if boundary_compatibility_enabled:
+                            image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, teacher_probs_u_aug = mixed_result
+                        else:
+                            image_u_aug, label_u_aug, logits_u_aug, mix_source_mask = mixed_result
                 elif cfg["trainer"]["unsupervised"].get("use_cutmix_adaptive", False):                                    
                     image_u_aug, label_u_aug, logits_u_aug = cut_mix_label_adaptive(
                         image_u_aug, label_u_aug, logits_u_aug,
@@ -1002,14 +1045,32 @@ def train(
 
             # 3. forward concate labeled + unlabeld into student networks
             num_labeled = len(image_l)
+            decoder_features_u_strong = None
             if flag_extra_weak:
-                pred_all, aux_all = model(torch.cat((image_l, image_u_weak, image_u_aug), dim=0))
+                if boundary_compatibility_enabled:
+                    pred_all, aux_all, feature_all = model(
+                        torch.cat((image_l, image_u_weak, image_u_aug), dim=0),
+                        return_features=True,
+                    )
+                    decoder_features_all = feature_all.get("decoder")
+                    _, decoder_features_u_strong = decoder_features_all[num_labeled:].chunk(2)
+                    del feature_all, decoder_features_all
+                else:
+                    pred_all, aux_all = model(torch.cat((image_l, image_u_weak, image_u_aug), dim=0))
                 del image_l, image_u_weak, image_u_aug
                 pred_l= pred_all[:num_labeled]
                 _, pred_u_strong = pred_all[num_labeled:].chunk(2)
                 del pred_all
             else:
-                pred_all, aux_all = model(torch.cat((image_l, image_u_aug), dim=0))
+                if boundary_compatibility_enabled:
+                    pred_all, aux_all, feature_all = model(
+                        torch.cat((image_l, image_u_aug), dim=0),
+                        return_features=True,
+                    )
+                    decoder_features_u_strong = feature_all.get("decoder")[num_labeled:]
+                    del feature_all
+                else:
+                    pred_all, aux_all = model(torch.cat((image_l, image_u_aug), dim=0))
                 del image_l, image_u_weak, image_u_aug
                 pred_l= pred_all[:num_labeled]
                 pred_u_strong = pred_all[num_labeled:]
@@ -1024,6 +1085,8 @@ def train(
                 sup_loss = sup_loss_fn(pred_l, label_l)
 
             # 5. unsupervised loss
+            bcr_loss = pred_u_strong.sum() * 0.0
+            component_weight_for_bcr = None
             if boundary_component_enabled and mix_source_mask is not None:
                 component_eps = float(boundary_component_cfg.get("eps", 1e-6))
                 if target_component_label is None:
@@ -1055,6 +1118,7 @@ def train(
                 component_target[~valid] = ignore
                 component_weight = component_weight.to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
                 component_weight = component_weight * valid.to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
+                component_weight_for_bcr = component_weight.detach()
                 weighted_loss_denominator = component_weight.sum().clamp_min(component_eps)
                 component_ce = F.cross_entropy(
                     pred_u_strong,
@@ -1197,9 +1261,72 @@ def train(
                             pred_u_strong, label_u_aug.detach(),
                             logits_u_aug.detach(), thresh=p_threshold)
             unsup_loss *= cfg["trainer"]["unsupervised"].get("loss_weight", 1.0)
-            del pred_l, pred_u_strong, label_u_aug, logits_u_aug
+
+            if boundary_compatibility_enabled and mix_source_mask is not None:
+                if boundary_compatibility_cfg.get("semantic_metric", "js") != "js":
+                    raise ValueError("boundary_compatibility.semantic_metric currently supports 'js' only")
+                if boundary_compatibility_cfg.get("feature_layer", "decoder") != "decoder":
+                    raise ValueError("boundary_compatibility.feature_layer currently supports 'decoder' only")
+                use_component_gate = bool(boundary_compatibility_cfg.get("use_component_gate", False))
+                bcr_loss, bcr_stats = compute_js_boundary_compatibility_loss(
+                    decoder_features_u_strong,
+                    label_u_aug.detach(),
+                    teacher_probs_u_aug.detach() if teacher_probs_u_aug is not None else None,
+                    logits_u_aug.detach(),
+                    mix_source_mask.detach(),
+                    component_weight_map_or_none=component_weight_for_bcr if use_component_gate else None,
+                    num_classes=cfg["net"]["num_classes"],
+                    ignore_index=ignore,
+                    band_width=int(boundary_compatibility_cfg.get("band_width", 3)),
+                    pair_mode=boundary_compatibility_cfg.get("pair_mode", "radius"),
+                    pair_radius=int(boundary_compatibility_cfg.get("pair_radius", 1)),
+                    topk=int(boundary_compatibility_cfg.get("topk", 5)),
+                    max_pairs_per_image=int(boundary_compatibility_cfg.get("max_pairs_per_image", 2048)),
+                    tau_same=float(boundary_compatibility_cfg.get("tau_same", 0.8)),
+                    tau_diff=float(boundary_compatibility_cfg.get("tau_diff", 0.3)),
+                    margin=float(boundary_compatibility_cfg.get("margin", 0.4)),
+                    use_confidence_gate=bool(boundary_compatibility_cfg.get("use_confidence_gate", True)),
+                    use_component_gate=use_component_gate,
+                    detach_teacher_distribution=bool(boundary_compatibility_cfg.get("detach_teacher_distribution", True)),
+                    detach_gate=bool(boundary_compatibility_cfg.get("detach_gate", True)),
+                    eps=float(boundary_compatibility_cfg.get("eps", 1e-6)),
+                )
+                do_bcr_debug = (
+                    rank == 0
+                    and boundary_compatibility_debug_enabled
+                    and (
+                        step < int(boundary_compatibility_cfg.get("debug_first_batches", 3))
+                        or do_log_now
+                    )
+                )
+                if do_bcr_debug:
+                    logger.info(
+                        "[boundary_compatibility] epoch=%d step=%d global_iter=%d "
+                        "num_pairs_per_image=%.4f same_pairs_ratio=%.4f diff_pairs_ratio=%.4f "
+                        "uncertain_pairs_ratio=%.4f mean_s_sem=%.4f mean_s_F=%.4f "
+                        "mean_r_ab=%.4f mean_JS=%.4f L_BCR=%.6f pair_radius=%d band_width=%d"
+                        % (
+                            epoch,
+                            step,
+                            i_iter,
+                            bcr_stats["num_pairs_per_image"],
+                            bcr_stats["same_pairs_ratio"],
+                            bcr_stats["diff_pairs_ratio"],
+                            bcr_stats["uncertain_pairs_ratio"],
+                            bcr_stats["mean_s_sem"],
+                            bcr_stats["mean_s_F"],
+                            bcr_stats["mean_r_ab"],
+                            bcr_stats["mean_JS"],
+                            bcr_stats["L_BCR"],
+                            bcr_stats["pair_radius"],
+                            bcr_stats["band_width"],
+                        )
+                    )
+            del pred_l, pred_u_strong, label_u_aug, logits_u_aug, decoder_features_u_strong
 
         loss = sup_loss + unsup_loss
+        if bcr_loss is not None:
+            loss = loss + float(cfg.get("boundary_compatibility", {}).get("lambda_bcr", 0.0)) * bcr_loss
 
         # update student model
         optimizer.zero_grad()

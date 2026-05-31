@@ -48,7 +48,7 @@ class dec_deeplabv3_plus(nn.Module):
         )
 
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x1, x2, x3, x4 = x
         low_feat = self.low_conv(x1)
         h, w = low_feat.size()[-2:]
@@ -60,8 +60,11 @@ class dec_deeplabv3_plus(nn.Module):
         )
 
         aspp_out = torch.cat((low_feat, aspp_out), dim=1)
-        
-        return self.classifier(aspp_out)
+        logits = self.classifier(aspp_out)
+
+        if return_features:
+            return logits, aspp_out
+        return logits
 
 
 class Aux_Module(nn.Module):

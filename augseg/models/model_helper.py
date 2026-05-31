@@ -47,28 +47,40 @@ class ModelBuilder(nn.Module):
         else:
             return cls(pretrain_model_url=pretrain_model_url, **kwargs)
 
-    def forward(self, x, flag_use_fdrop=False):
+    def forward(self, x, flag_use_fdrop=False, return_features=False):
         h, w = x.shape[-2:]
         if self._use_auxloss:
             f1, f2, feat1, feat2 = self.encoder(x)
-            outs = self.decoder([f1, f2, feat1, feat2])
+            decoder_out = self.decoder([f1, f2, feat1, feat2], return_features=return_features)
+            if return_features:
+                outs, decoder_features = decoder_out
+            else:
+                outs = decoder_out
+                decoder_features = None
             pred_aux = self.auxor(feat1)
 
             # upsampling
             outs = F.interpolate(outs, (h, w), mode="bilinear", align_corners=True)
             pred_aux = F.interpolate(pred_aux, (h, w), mode="bilinear", align_corners=True)
-            
+            if return_features:
+                return outs, pred_aux, {"decoder": decoder_features}
             return outs, pred_aux
         else:
             if flag_use_fdrop:
                 f1, f2, feat1, feat2 = self.encoder(x)
                 f1 = nn.Dropout2d(0.5)(f1)
                 feat2 = nn.Dropout2d(0.5)(feat2)
-                outs = self.decoder([f1, f2, feat1, feat2])
+                decoder_out = self.decoder([f1, f2, feat1, feat2], return_features=return_features)
             else:
                 feat = self.encoder(x)
-                outs = self.decoder(feat)
+                decoder_out = self.decoder(feat, return_features=return_features)
+            if return_features:
+                outs, decoder_features = decoder_out
+            else:
+                outs = decoder_out
+                decoder_features = None
 
             outs = F.interpolate(outs, (h, w), mode="bilinear", align_corners=True)
-            
+            if return_features:
+                return outs, None, {"decoder": decoder_features}
             return outs, None
