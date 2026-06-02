@@ -1,0 +1,14 @@
+[Unit]
+Description=AugSeg BoundaryMix RTX A6000 Postgres Worker
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/islabworker3/tantv/AugSeg_BoundaryMix_V2V3
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc 'source /home/islabworker3/tantv/.secrets/augseg_scheduler.env && export HF_HOME=/home/islabworker3/tantv/.cache/huggingface && conda run -p /home/islabworker3/tantv/envs/augseg-bm python scheduler/worker.py --backend postgres --server-name islab-server3 --gpu-id 0 --loop --sleep-sec 60'
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
