@@ -1,0 +1,15 @@
+[Unit]
+Description=AugSeg BoundaryMix RTX 5090 Postgres Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc 'source ~/.secrets/augseg_scheduler.env && conda run -n augseg-bm python scheduler/worker.py --backend postgres --server-name supermaster --gpu-id 0 --loop --sleep-sec 60'
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=AugSeg BoundaryMix RTX 5090 Worker
+After=network-online.target augseg-coordinator.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
+ExecStart=/bin/bash -lc '/opt/tljh/user/condabin/conda run -n augseg-bm python scheduler/worker.py --server-name supermaster --gpu-id 0 --coordinator-url http://127.0.0.1:8787 --loop --sleep-sec 60'
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

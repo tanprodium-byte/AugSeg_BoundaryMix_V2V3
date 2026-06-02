@@ -1,0 +1,14 @@
+[Unit]
+Description=AugSeg BoundaryMix Coordinator API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
+ExecStart=/bin/bash -lc '/opt/tljh/user/condabin/conda run -n augseg-bm python scheduler/coordinator_api.py --host 0.0.0.0 --port 8787'
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
