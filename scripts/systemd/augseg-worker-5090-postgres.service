@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
 Environment=PYTHONUNBUFFERED=1
+Environment=AUGSEG_REQUIRED_FREE_VRAM_MB=28000
+Environment=AUGSEG_OOM_COOLDOWN_MINUTES=10
+Environment=AUGSEG_JOB_LEASE_HOURS=48
 ExecStart=/bin/bash -lc 'source ~/.secrets/augseg_scheduler.env && conda run -n augseg-bm python scheduler/worker.py --backend postgres --server-name supermaster --gpu-id 0 --loop --sleep-sec 60'
 Restart=always
 RestartSec=30

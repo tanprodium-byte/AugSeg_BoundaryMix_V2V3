@@ -22,18 +22,21 @@ def main() -> int:
               COALESCE(worker_id, '') AS worker_id,
               attempts,
               COALESCE(last_error, '') AS last_error,
+              COALESCE(last_error_class, '') AS last_error_class,
+              next_retry_at,
               updated_at
             FROM configs
             ORDER BY config_id
             """
         ).fetchall()
 
-    print("config_id | current_epoch | status | worker_id | attempts | last_error | updated_at")
+    print("config_id | current_epoch | status | worker_id | attempts | last_error_class | next_retry_at | last_error | updated_at")
     print("-" * 120)
     for row in rows:
         print(
             f"{row['config_id']} | {row['current_epoch']} | {row['status']} | "
-            f"{row['worker_id']} | {row['attempts']} | {row['last_error']} | {row['updated_at']}"
+            f"{row['worker_id']} | {row['attempts']} | {row['last_error_class']} | "
+            f"{row['next_retry_at']} | {row['last_error']} | {row['updated_at']}"
         )
     return 0
 

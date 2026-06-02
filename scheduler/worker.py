@@ -19,17 +19,35 @@ from scheduler.config import DB_PATH, ROOT, default_worker_id, load_hf_settings
 from scheduler.db import connect, init_db, mark_done, mark_failed, request_job, set_latest_hf_path
 
 
-def gpu_used_mib(gpu_id: int) -> int:
+def gpu_memory_mib(gpu_id: int) -> dict:
     out = subprocess.check_output(
         [
             "nvidia-smi",
             f"--id={gpu_id}",
-            "--query-gpu=memory.used",
+            "--query-gpu=name,memory.total,memory.used,memory.free",
             "--format=csv,noheader,nounits",
         ],
         text=True,
     )
-    return int(out.strip().splitlines()[0].strip())
+    parts = [part.strip() for part in out.strip().splitlines()[0].split(",")]
+    return {
+        "name": parts[0],
+        "total_mib": int(parts[1]),
+        "used_mib": int(parts[2]),
+        "free_mib": int(parts[3]),
+    }
+
+
+def required_free_vram_mib(gpu_name: str) -> int:
+    raw = os.environ.get("AUGSEG_REQUIRED_FREE_VRAM_MB")
+    if raw:
+        return int(raw)
+    name = gpu_name.lower()
+    if "5090" in name:
+        return 28000
+    if "a6000" in name:
+        return 30000
+    return 28000
 
 
 def is_oom(log_path: str | None) -> bool:
@@ -219,7 +237,7 @@ def main() -> int:
     parser.add_argument("--sleep-seconds", type=int, default=300)
     parser.add_argument("--sleep-sec", type=int, default=None)
     parser.add_argument("--heartbeat-sec", type=int, default=300)
-    parser.add_argument("--gpu-free-threshold-mib", type=int, default=4000)
+    parser.add_argument("--gpu-free-threshold-mib", type=int, default=None)
     args = parser.parse_args()
 
     if args.sleep_sec is not None:
@@ -239,17 +257,42 @@ def main() -> int:
         init_db(conn)
 
     while True:
-        used = gpu_used_mib(args.gpu_id)
-        if used >= args.gpu_free_threshold_mib:
-            print(f"BUSY gpu={args.gpu_id} memory.used={used} MiB threshold={args.gpu_free_threshold_mib} MiB")
+        memory = gpu_memory_mib(args.gpu_id)
+        required_free = (
+            args.gpu_free_threshold_mib
+            if args.gpu_free_threshold_mib is not None
+            else required_free_vram_mib(memory["name"])
+        )
+        memory_detail = (
+            f"gpu={args.gpu_id} name={memory['name']} "
+            f"memory.total={memory['total_mib']} MiB "
+            f"memory.used={memory['used_mib']} MiB "
+            f"memory.free={memory['free_mib']} MiB "
+            f"required_free={required_free} MiB"
+        )
+        if memory["free_mib"] < required_free:
+            print(f"BUSY {memory_detail}")
             if pg_db:
-                pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "busy", f"memory.used={used} MiB")
+                pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "busy", memory_detail)
             if args.once:
                 return 1
             time.sleep(args.sleep_seconds)
             continue
 
         if pg_db:
+            running = pg_db.find_running_job_for_worker(worker_id, args.server_name, args.gpu_id)
+            if running:
+                detail = (
+                    f"existing running job job_id={running['job_id']} "
+                    f"config_id={running['config_id']} worker_id={running['worker_id']} "
+                    f"server_name={running['server_name']} gpu_id={running['gpu_id']}"
+                )
+                print(f"BUSY_RUNNING_JOB {detail}")
+                pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "busy_running_job", detail)
+                if args.once:
+                    return 1
+                time.sleep(args.sleep_seconds)
+                continue
             pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "free_claiming", None)
             job = pg_db.claim_next_job(worker_id, args.server_name, args.gpu_id)
         elif args.coordinator_url:
