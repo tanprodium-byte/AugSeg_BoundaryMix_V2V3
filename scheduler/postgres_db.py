@@ -21,6 +21,15 @@ OOM_PATTERNS = (
     "CUDA out of memory",
     "torch.cuda.OutOfMemoryError",
 )
+ERROR_CLASS_PATTERNS = (
+    ("oom", ("OOM", "out of memory", "CUDA out of memory", "torch.cuda.OutOfMemoryError")),
+    ("interrupted", ("Interrupted", "SIGTERM", "SIGINT", "KeyboardInterrupt")),
+    ("import_error", ("ImportError", "ModuleNotFoundError", "No module named")),
+    ("file_not_found", ("FileNotFoundError", "No such file or directory", "not found")),
+    ("permission", ("PermissionError", "Permission denied")),
+    ("cuda_unavailable", ("CUDA unavailable", "cuda is not available", "No CUDA GPUs are available")),
+    ("config_error", ("KeyError", "yaml", "YAMLError", "config")),
+)
 _INIT_DONE = False
 DB_RETRY_ATTEMPTS = 5
 
@@ -135,8 +144,19 @@ def is_oom_error(error: str | None) -> bool:
     return any(pattern.lower() in lowered for pattern in OOM_PATTERNS)
 
 
-def clipped_error(error: str | None, limit: int = 2000) -> str:
+def clipped_error(error: str | None, limit: int = 8000) -> str:
     return (error or "")[:limit]
+
+
+def classify_error(error: str | None) -> str:
+    text = error or ""
+    lowered = text.lower()
+    for error_class, patterns in ERROR_CLASS_PATTERNS:
+        if any(pattern.lower() in lowered for pattern in patterns):
+            return error_class
+    if "returncode=" in lowered:
+        return "returncode"
+    return "returncode"
 
 
 def short_oom_error(error: str | None) -> str:
@@ -342,6 +362,7 @@ def report_failed(
 ) -> bool:
     init_db()
     error_text = clipped_error(error)
+    error_class = classify_error(error_text)
     with transaction() as conn:
         job = conn.execute("SELECT * FROM jobs WHERE job_id=%s FOR UPDATE", (job_id,)).fetchone()
         if job is None or job["worker_id"] != worker_id:
@@ -385,12 +406,12 @@ def report_failed(
                 worker_id=NULL,
                 lease_until=NULL,
                 last_error=%s,
-                last_error_class=NULL,
+                last_error_class=%s,
                 next_retry_at=NULL,
                 updated_at=NOW()
             WHERE config_id=%s
             """,
-            (attempts, config_status, error_text, job["config_id"]),
+            (attempts, config_status, error_text, error_class, job["config_id"]),
         )
         return True
 

@@ -19,6 +19,8 @@ sys.path.insert(0, str(ROOT))
 from scheduler.config import ROOT, RUN_ROOT, load_hf_settings
 
 CURRENT_TRAIN_PROCESS: subprocess.Popen | None = None
+ERROR_TAIL_LINES = 200
+ERROR_TAIL_CHARS = 8000
 
 
 def install_train_signal_handlers() -> None:
@@ -37,8 +39,51 @@ def choose_port(job_id: str) -> int:
     return 54000 + (int(job_id[:6], 16) % 1000)
 
 
+def text_tail(text: str, max_lines: int = ERROR_TAIL_LINES, max_chars: int = ERROR_TAIL_CHARS) -> str:
+    lines = text.splitlines()[-max_lines:]
+    return "\n".join(lines)[-max_chars:]
+
+
+def file_tail(path: Path, max_lines: int = ERROR_TAIL_LINES, max_chars: int = ERROR_TAIL_CHARS) -> str:
+    try:
+        return text_tail(path.read_text(errors="replace"), max_lines=max_lines, max_chars=max_chars)
+    except OSError as exc:
+        return f"unable to read log tail: {exc}"
+
+
+def resolve_config_path(config_path: str | Path, repo_root: Path = ROOT) -> Path:
+    original = str(config_path)
+    src = Path(original)
+    if src.is_file():
+        return src
+
+    resolved: Path | None = None
+    if not src.is_absolute():
+        candidate = repo_root / src
+        if candidate.is_file():
+            return candidate
+        resolved = candidate
+
+    normalized = original.replace("\\", "/")
+    for marker in ("exps/", ".codex_smoke/"):
+        marker_index = normalized.find(marker)
+        if marker_index >= 0:
+            suffix = normalized[marker_index:]
+            candidate = repo_root / Path(suffix)
+            resolved = candidate
+            if candidate.is_file():
+                return candidate
+
+    raise FileNotFoundError(
+        "Unable to resolve scheduler config path: "
+        f"original_config_path={original} "
+        f"resolved_config_path={resolved if resolved is not None else src} "
+        f"repo_root={repo_root}"
+    )
+
+
 def write_job_config(args: argparse.Namespace) -> Path:
-    src = Path(args.config_path)
+    src = resolve_config_path(args.config_path, ROOT)
     cfg = yaml.safe_load(src.read_text())
     cfg["trainer"]["epochs"] = int(args.to_epoch)
     cfg.setdefault("hf", {})["enabled"] = False
@@ -144,7 +189,16 @@ def main() -> int:
         returncode = proc.wait()
         CURRENT_TRAIN_PROCESS = None
     if returncode != 0:
-        print(json.dumps({"status": "failed", "returncode": returncode, "log": str(log_path)}))
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "returncode": returncode,
+                    "log": str(log_path),
+                    "error_tail": file_tail(log_path),
+                }
+            )
+        )
         return returncode
 
     artifact_dir, files = collect_artifacts(args.job_id, args.config_id, job_config)

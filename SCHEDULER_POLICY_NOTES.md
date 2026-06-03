@@ -57,6 +57,35 @@ Errors containing `OOM`, `out of memory`, `CUDA out of memory`, or `torch.cuda.O
 
 OOM does not set `failed_final`, and max attempts do not make an OOM config final. Non-OOM errors still use the normal attempts/max-attempts path and can become `failed_final`.
 
+## returncode=1 bootstrap failures
+
+`returncode=1` is not a root cause by itself. Scheduler failures must include either:
+
+- `log_path=.scheduler_runs/logs/<job_id>.log` plus a tail of the train stdout/stderr, or
+- an `error_tail` from `scheduler/run_train_job.py` stdout when the runner fails before creating the train log.
+
+Do not reset `failed_final` configs that only show `returncode=1` until the root cause has been diagnosed and fixed. Common bootstrap causes include stale absolute config paths from another host, missing dependencies, missing data/pretrained files, or invalid temporary config generation.
+
+Diagnose recent failed jobs without updating DB:
+
+```bash
+cd /home/islabworker3/tantv/AugSeg_BoundaryMix_V2V3
+source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
+python scripts/diagnose_recent_failed_jobs.py --limit 20
+```
+
+After the bootstrap root cause is fixed, dry-run the `returncode=1` failed-final reset:
+
+```bash
+python scripts/reset_returncode1_failed_final_to_retryable.py --dry-run
+```
+
+Apply only after reviewing the affected configs and confirming there are no running jobs for them:
+
+```bash
+python scripts/reset_returncode1_failed_final_to_retryable.py --apply
+```
+
 ## Free VRAM gate
 
 Workers now gate on `memory.free`, not `memory.used`.
@@ -80,8 +109,8 @@ Heartbeat details include `memory.used`, `memory.free`, and `required_free`.
 Dry-run OOM `failed_final` repair first:
 
 ```bash
-cd /home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
-source ~/.secrets/augseg_scheduler.env
+cd /home/islabworker3/tantv/AugSeg_BoundaryMix_V2V3
+source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
 python scripts/reset_oom_failed_final_to_retryable.py --dry-run
 ```
 
@@ -100,8 +129,8 @@ A stale running job is a Postgres row where `jobs.status='running'` and `configs
 Dry-run the current stale job first:
 
 ```bash
-cd /home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
-source ~/.secrets/augseg_scheduler.env
+cd /home/islabworker3/tantv/AugSeg_BoundaryMix_V2V3
+source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
 python scripts/reset_stale_running_job_to_retryable.py --config-id v2_component_weighting --worker-id supermaster:gpu0 --dry-run
 ```
 
@@ -159,6 +188,7 @@ These tests do not run training:
 ```bash
 python -m py_compile scheduler/postgres_db.py scheduler/worker.py scheduler/status_postgres.py
 python scripts/test_postgres_scheduler_policy.py
-python -m py_compile scheduler/postgres_db.py scheduler/worker.py scheduler/run_train_job.py scheduler/status_postgres.py scripts/reset_stale_running_job_to_retryable.py scripts/test_scheduler_signal_and_stale_policy.py
+python -m py_compile scheduler/postgres_db.py scheduler/worker.py scheduler/run_train_job.py scheduler/status_postgres.py scripts/diagnose_recent_failed_jobs.py scripts/reset_returncode1_failed_final_to_retryable.py scripts/reset_stale_running_job_to_retryable.py scripts/test_scheduler_signal_and_stale_policy.py
+python scripts/diagnose_recent_failed_jobs.py --limit 10
 python scripts/test_scheduler_signal_and_stale_policy.py
 ```

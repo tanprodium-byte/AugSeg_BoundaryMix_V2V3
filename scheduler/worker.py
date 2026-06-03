@@ -21,6 +21,8 @@ from scheduler.db import connect, init_db, mark_done, mark_failed, request_job, 
 
 INTERRUPTED_ERROR = "Interrupted by service stop/restart SIGTERM"
 DEFAULT_CHILD_TERMINATE_TIMEOUT_SEC = 120.0
+ERROR_TAIL_LINES = 200
+ERROR_TAIL_CHARS = 8000
 
 
 class WorkerRuntimeState:
@@ -142,6 +144,11 @@ def is_oom(log_path: str | None) -> bool:
         return False
     lowered = text.lower()
     return "outofmemoryerror" in lowered or "cuda out of memory" in lowered or "out of memory" in lowered
+
+
+def text_tail(text: str, max_lines: int = ERROR_TAIL_LINES, max_chars: int = ERROR_TAIL_CHARS) -> str:
+    lines = text.splitlines()[-max_lines:]
+    return "\n".join(lines)[-max_chars:]
 
 
 def parse_runner_output(stdout: str) -> dict:
@@ -321,7 +328,16 @@ def run_job(
     if proc.returncode == 0 and parsed.get("status") == "success":
         return True, parsed, stdout
     log = parsed.get("log")
-    reason = "OOM" if is_oom(log) else f"returncode={proc.returncode}"
+    if is_oom(log):
+        reason = "OOM"
+    else:
+        parts = [f"returncode={proc.returncode}"]
+        if log:
+            parts.append(f"log_path={log}")
+        error_tail = parsed.get("error_tail") or text_tail(stdout)
+        if error_tail:
+            parts.append("error_tail:\n" + text_tail(str(error_tail)))
+        reason = "\n".join(parts)
     return False, parsed, reason
 
 
