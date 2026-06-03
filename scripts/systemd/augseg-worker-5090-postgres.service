@@ -10,7 +10,12 @@ Environment=PYTHONUNBUFFERED=1
 Environment=AUGSEG_REQUIRED_FREE_VRAM_MB=28000
 Environment=AUGSEG_OOM_COOLDOWN_MINUTES=10
 Environment=AUGSEG_JOB_LEASE_HOURS=48
-ExecStart=/bin/bash -lc 'source ~/.secrets/augseg_scheduler.env && conda run -n augseg-bm python scheduler/worker.py --backend postgres --server-name supermaster --gpu-id 0 --loop --sleep-sec 60'
+Environment=AUGSEG_AUTO_REPAIR_STALE_RUNNING=0
+# KillMode=mixed sends SIGTERM to the main worker first so it can report
+# interrupted/retryable; after TimeoutStopSec systemd may SIGKILL the cgroup.
+KillMode=mixed
+TimeoutStopSec=180
+ExecStart=/bin/bash -lc 'source ~/.secrets/augseg_scheduler.env && conda run -n augseg-bm python scheduler/worker.py --backend postgres --server-name supermaster --gpu-id 0 --loop --sleep-sec 15'
 Restart=always
 RestartSec=30
 

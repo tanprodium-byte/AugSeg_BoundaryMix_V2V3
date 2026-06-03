@@ -9,7 +9,12 @@ Environment=PYTHONUNBUFFERED=1
 Environment=AUGSEG_REQUIRED_FREE_VRAM_MB=30000
 Environment=AUGSEG_OOM_COOLDOWN_MINUTES=10
 Environment=AUGSEG_JOB_LEASE_HOURS=48
-ExecStart=/bin/bash -lc 'source /home/islabworker3/tantv/.secrets/augseg_scheduler.env && export HF_HOME=/home/islabworker3/tantv/.cache/huggingface && conda run -p /home/islabworker3/tantv/envs/augseg-bm python scheduler/worker.py --backend postgres --server-name islab-server3 --gpu-id 0 --loop --sleep-sec 60'
+Environment=AUGSEG_AUTO_REPAIR_STALE_RUNNING=0
+# KillMode=mixed sends SIGTERM to the main worker first so it can report
+# interrupted/retryable; after TimeoutStopSec systemd may SIGKILL the cgroup.
+KillMode=mixed
+TimeoutStopSec=180
+ExecStart=/bin/bash -lc 'source /home/islabworker3/tantv/.secrets/augseg_scheduler.env && export HF_HOME=/home/islabworker3/tantv/.cache/huggingface && conda run -p /home/islabworker3/tantv/envs/augseg-bm python scheduler/worker.py --backend postgres --server-name islab-server3 --gpu-id 0 --loop --sleep-sec 15'
 Restart=always
 RestartSec=30
 

@@ -6,6 +6,8 @@
 
 When a worker has an assigned training process, it stays inside that train subprocess and only sends heartbeats/lease renewals. It does not poll or claim another job until the subprocess exits and the worker reports DONE or FAILED.
 
+Avoid restarting the worker service while training unless it is necessary. If a stop/restart is required, the worker catches SIGTERM/SIGINT, terminates only the child process it spawned, and reports the active job as interrupted/retryable before exiting.
+
 ## One GPU, one scheduler job
 
 Postgres workers must not claim a new job while the database already has a `jobs.status='running'` row with:
@@ -13,7 +15,31 @@ Postgres workers must not claim a new job while the database already has a `jobs
 - the same `worker_id`, or
 - the same `server_name` and `gpu_id`.
 
-This protects a GPU after service restart: if the train process is still alive and the database still has the job running, the restarted worker heartbeats `busy_running_job` and waits instead of launching a second train.
+This protects a GPU after service restart: if the database still has the job running, the restarted worker heartbeats `blocked_stale_running` with `running job exists; manual repair required` and waits instead of launching a second train.
+
+By default, `AUGSEG_AUTO_REPAIR_STALE_RUNNING=0`; the worker does not reset production running rows automatically. If explicitly set to `1`, the worker may repair only a stale running job for its exact `worker_id`, `server_name`, and `gpu_id`.
+
+## Graceful systemd stop
+
+The Postgres worker service templates use:
+
+```text
+KillMode=mixed
+TimeoutStopSec=180
+```
+
+`KillMode=mixed` sends SIGTERM to the main worker first, giving it a chance to report `interrupted` and return the config to `failed_retryable`. If the service has not stopped after `TimeoutStopSec`, systemd may SIGKILL the control group.
+
+Interrupted jobs are recorded as:
+
+- `jobs.status='failed'`
+- `jobs.error='Interrupted by service stop/restart SIGTERM'`
+- `configs.status='failed_retryable'`
+- `configs.worker_id=NULL`
+- `configs.last_error_class='interrupted'`
+- `configs.next_retry_at=NOW()`
+
+Interrupted handling does not increment `configs.attempts`.
 
 ## OOM policy
 
@@ -51,12 +77,12 @@ Heartbeat details include `memory.used`, `memory.free`, and `required_free`.
 
 ## Repair command
 
-Dry-run first:
+Dry-run OOM `failed_final` repair first:
 
 ```bash
 cd /home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
 source ~/.secrets/augseg_scheduler.env
-python scripts/reset_oom_failed_final_to_retryable.py
+python scripts/reset_oom_failed_final_to_retryable.py --dry-run
 ```
 
 Apply only after reviewing affected config IDs:
@@ -66,6 +92,39 @@ python scripts/reset_oom_failed_final_to_retryable.py --apply
 ```
 
 The repair script does not print the DB URL and does not touch configs with a running job.
+
+## Stale running repair
+
+A stale running job is a Postgres row where `jobs.status='running'` and `configs.status='running'`, but no current worker child process is responsible for that job anymore. This can happen if a previous worker was stopped before it could report the interruption.
+
+Dry-run the current stale job first:
+
+```bash
+cd /home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
+source ~/.secrets/augseg_scheduler.env
+python scripts/reset_stale_running_job_to_retryable.py --config-id v2_component_weighting --worker-id supermaster:gpu0 --dry-run
+```
+
+Apply only after reviewing the dry-run output:
+
+```bash
+python scripts/reset_stale_running_job_to_retryable.py --config-id v2_component_weighting --worker-id supermaster:gpu0 --apply
+```
+
+After repair, `scheduler/status_postgres.py` will show the config as `failed_retryable`; the scheduler can run it again when GPU free VRAM is high enough.
+
+## Safe deploy order
+
+Use this order so workers get the signal/stale/OOM policy before production repair rows are applied:
+
+1. Commit and push the scheduler/service/docs changes.
+2. On A6000: `git pull`, copy `scripts/systemd/augseg-worker-a6000-postgres.service.template`, then restart that worker.
+3. On supermaster: `git pull`, copy `scripts/systemd/augseg-worker-5090-postgres.service`, then restart that worker.
+4. Dry-run stale running repair.
+5. Apply stale running repair.
+6. Dry-run OOM `failed_final` repair.
+7. Apply OOM `failed_final` repair.
+8. Check `python scheduler/status_postgres.py`.
 
 ## Deploy: supermaster 5090
 
@@ -100,4 +159,6 @@ These tests do not run training:
 ```bash
 python -m py_compile scheduler/postgres_db.py scheduler/worker.py scheduler/status_postgres.py
 python scripts/test_postgres_scheduler_policy.py
+python -m py_compile scheduler/postgres_db.py scheduler/worker.py scheduler/run_train_job.py scheduler/status_postgres.py scripts/reset_stale_running_job_to_retryable.py scripts/test_scheduler_signal_and_stale_policy.py
+python scripts/test_scheduler_signal_and_stale_policy.py
 ```

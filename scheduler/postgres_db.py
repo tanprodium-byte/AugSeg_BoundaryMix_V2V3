@@ -164,6 +164,35 @@ def find_running_job_for_worker(worker_id: str, server_name: str, gpu_id: int) -
         ).fetchone()
 
 
+def report_interrupted(job_id: str, worker_id: str, error: str) -> bool:
+    init_db()
+    error_text = clipped_error(error)
+    with transaction() as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE job_id=%s FOR UPDATE", (job_id,)).fetchone()
+        if job is None or job["status"] != "running" or job["worker_id"] != worker_id:
+            return False
+
+        conn.execute(
+            "UPDATE jobs SET status='failed', finished_at=NOW(), error=%s WHERE job_id=%s",
+            (error_text, job_id),
+        )
+        conn.execute(
+            """
+            UPDATE configs
+            SET status='failed_retryable',
+                worker_id=NULL,
+                lease_until=NULL,
+                last_error=%s,
+                last_error_class='interrupted',
+                next_retry_at=NOW(),
+                updated_at=NOW()
+            WHERE config_id=%s
+            """,
+            (error_text, job["config_id"]),
+        )
+        return True
+
+
 def claim_next_job(worker_id: str, server_name: str, gpu_id: int, lease_minutes: int = 30) -> dict | None:
     init_db()
     with transaction() as conn:
@@ -429,5 +458,6 @@ find_running_job_for_worker = _retry_deadlocks(find_running_job_for_worker)
 claim_next_job = _retry_deadlocks(claim_next_job)
 report_done = _retry_deadlocks(report_done)
 report_failed = _retry_deadlocks(report_failed)
+report_interrupted = _retry_deadlocks(report_interrupted)
 heartbeat = _retry_deadlocks(heartbeat)
 renew_job_lease = _retry_deadlocks(renew_job_lease)

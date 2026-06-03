@@ -15,8 +15,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Reset OOM failed_final configs to retryable after scheduler policy change."
     )
+    parser.add_argument("--dry-run", action="store_true", help="List affected configs without updating. This is the default.")
     parser.add_argument("--apply", action="store_true", help="Apply changes. Default is dry-run.")
     args = parser.parse_args()
+
+    if args.apply and args.dry_run:
+        print("REFUSED conflicting_flags: use either --dry-run or --apply")
+        return 2
 
     init_db()
     with transaction() as conn:

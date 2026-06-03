@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scheduler.config import ROOT, RUN_ROOT, load_hf_settings
+
+CURRENT_TRAIN_PROCESS: subprocess.Popen | None = None
+
+
+def install_train_signal_handlers() -> None:
+    def _handler(signum, _frame) -> None:
+        name = signal.Signals(signum).name
+        print(f"run_train_job received {name}; terminating child torchrun", flush=True)
+        proc = CURRENT_TRAIN_PROCESS
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
 
 
 def choose_port(job_id: str) -> int:
@@ -94,6 +109,8 @@ def upload_job_artifacts(job_id: str, config_id: str, artifact_dir: Path, files:
 
 
 def main() -> int:
+    global CURRENT_TRAIN_PROCESS
+    install_train_signal_handlers()
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--config-id", required=True)
@@ -122,10 +139,13 @@ def main() -> int:
     ]
     started = time.time()
     with log_path.open("w") as log:
-        proc = subprocess.run(cmd, cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT)
-    if proc.returncode != 0:
-        print(json.dumps({"status": "failed", "returncode": proc.returncode, "log": str(log_path)}))
-        return proc.returncode
+        proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT)
+        CURRENT_TRAIN_PROCESS = proc
+        returncode = proc.wait()
+        CURRENT_TRAIN_PROCESS = None
+    if returncode != 0:
+        print(json.dumps({"status": "failed", "returncode": returncode, "log": str(log_path)}))
+        return returncode
 
     artifact_dir, files = collect_artifacts(args.job_id, args.config_id, job_config)
     progress = {
