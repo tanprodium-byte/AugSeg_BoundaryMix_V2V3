@@ -14,7 +14,15 @@ import psycopg
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scheduler.postgres_db import claim_next_job, init_db, report_interrupted, transaction
+from scheduler.postgres_db import (
+    auto_repair_stale_running_job,
+    claim_next_job,
+    evaluate_running_job_blocker,
+    heartbeat,
+    init_db,
+    report_interrupted,
+    transaction,
+)
 from scheduler.worker import INTERRUPTED_ERROR, WorkerRuntimeState
 
 PREFIX = "test_signal_stale_"
@@ -39,6 +47,7 @@ def cleanup() -> None:
             with transaction() as conn:
                 conn.execute("DELETE FROM jobs WHERE config_id LIKE %s", (PREFIX + "%",))
                 conn.execute("DELETE FROM configs WHERE config_id LIKE %s", (PREFIX + "%",))
+                conn.execute("DELETE FROM worker_heartbeats WHERE worker_id LIKE %s", (PREFIX + "%",))
             return
         except psycopg.errors.DeadlockDetected:
             if attempt == 4:
@@ -61,20 +70,53 @@ def insert_config(config_id: str, status: str = "idle", worker_id: str | None = 
         )
 
 
-def insert_running_job(config_id: str, worker_id: str, server_name: str, gpu_id: int) -> str:
+def insert_running_job(
+    config_id: str,
+    worker_id: str,
+    server_name: str,
+    gpu_id: int,
+    lease_sql: str = "NOW() + INTERVAL '48 hours'",
+) -> str:
     job_id = uuid.uuid4().hex
     with transaction() as conn:
         conn.execute(
-            """
+            f"""
             INSERT INTO jobs (
               job_id, config_id, from_epoch, to_epoch, status, worker_id,
               server_name, gpu_id, started_at, finished_at, lease_until, error
             )
-            VALUES (%s, %s, 0, 1, 'running', %s, %s, %s, NOW(), NULL, NOW() + INTERVAL '48 hours', NULL)
+            VALUES (%s, %s, 0, 1, 'running', %s, %s, %s, NOW(), NULL, {lease_sql}, NULL)
             """,
             (job_id, config_id, worker_id, server_name, gpu_id),
         )
     return job_id
+
+
+def running_job_with_heartbeat(job_id: str) -> dict:
+    with transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT
+              j.job_id,
+              j.config_id,
+              j.worker_id,
+              j.server_name,
+              j.gpu_id,
+              j.started_at,
+              j.lease_until,
+              j.error,
+              h.status AS heartbeat_status,
+              h.last_seen AS heartbeat_last_seen,
+              h.detail AS heartbeat_detail,
+              NOW() AS now
+            FROM jobs j
+            LEFT JOIN worker_heartbeats h ON h.worker_id=j.worker_id
+            WHERE j.job_id=%s
+            """,
+            (job_id,),
+        ).fetchone()
+    assert row is not None, job_id
+    return row
 
 
 def config_row(config_id: str) -> dict:
@@ -162,6 +204,70 @@ def test_repair_apply_exact_running_job_only() -> None:
     assert other_cfg["status"] == "running", other_cfg
 
 
+def test_running_job_busy_heartbeat_possible_stale_warning() -> None:
+    config_id = PREFIX + "busy_possible_stale"
+    worker_id = PREFIX + "worker_busy_possible"
+    server_name = PREFIX + "server_busy_possible"
+    insert_config(config_id, status="running", worker_id=worker_id)
+    job_id = insert_running_job(config_id, worker_id, server_name, 0)
+    heartbeat(worker_id, server_name, 0, "busy", "memory.free=100 MiB required_free=30000 MiB")
+
+    row = running_job_with_heartbeat(job_id)
+    decision = evaluate_running_job_blocker(row, worker_id, server_name, 0, now=row["now"])
+    assert decision["possible_stale"], decision
+    assert decision["worker_status"] == "blocked_stale_running", decision
+    assert not decision["stale"], decision
+
+
+def test_running_job_recent_running_heartbeat_not_stale() -> None:
+    config_id = PREFIX + "recent_running"
+    worker_id = PREFIX + "worker_recent_running"
+    server_name = PREFIX + "server_recent_running"
+    insert_config(config_id, status="running", worker_id=worker_id)
+    job_id = insert_running_job(config_id, worker_id, server_name, 0)
+    heartbeat(worker_id, server_name, 0, "running", f"job_id={job_id} config_id={config_id}")
+
+    row = running_job_with_heartbeat(job_id)
+    decision = evaluate_running_job_blocker(row, worker_id, server_name, 0, now=row["now"])
+    assert not decision["possible_stale"], decision
+    assert not decision["stale"], decision
+    assert decision["worker_status"] == "blocked_running_job", decision
+
+
+def test_lease_expired_auto_repair_disabled_blocks_only() -> None:
+    config_id = PREFIX + "expired_block_only"
+    worker_id = PREFIX + "worker_expired_block"
+    server_name = PREFIX + "server_expired_block"
+    insert_config(config_id, status="running", worker_id=worker_id)
+    job_id = insert_running_job(config_id, worker_id, server_name, 0, lease_sql="NOW() - INTERVAL '1 minute'")
+    heartbeat(worker_id, server_name, 0, "running", f"job_id={job_id} config_id={config_id}")
+
+    row = running_job_with_heartbeat(job_id)
+    decision = evaluate_running_job_blocker(row, worker_id, server_name, 0, now=row["now"])
+    assert decision["stale"], decision
+    assert decision["worker_status"] == "blocked_stale_running", decision
+    assert config_row(config_id)["status"] == "running"
+    assert job_row(job_id)["status"] == "running"
+
+
+def test_lease_expired_auto_repair_enabled_resets_retryable() -> None:
+    config_id = PREFIX + "expired_repair"
+    worker_id = PREFIX + "worker_expired_repair"
+    server_name = PREFIX + "server_expired_repair"
+    insert_config(config_id, status="running", worker_id=worker_id)
+    job_id = insert_running_job(config_id, worker_id, server_name, 0, lease_sql="NOW() - INTERVAL '1 minute'")
+    heartbeat(worker_id, server_name, 0, "running", f"job_id={job_id} config_id={config_id}")
+
+    assert auto_repair_stale_running_job(job_id, worker_id, server_name, 0)
+    cfg = config_row(config_id)
+    job = job_row(job_id)
+    assert job["status"] == "failed", job
+    assert cfg["status"] == "failed_retryable", cfg
+    assert cfg["worker_id"] is None, cfg
+    assert cfg["attempts"] == 0, cfg
+    assert cfg["last_error_class"] == "interrupted", cfg
+
+
 def test_running_job_guard_blocks_claim() -> None:
     running_config_id = PREFIX + "guard_running"
     candidate_config_id = PREFIX + "guard_candidate"
@@ -195,6 +301,10 @@ def main() -> int:
             test_signal_interrupt_report,
             test_repair_dry_run_no_update,
             test_repair_apply_exact_running_job_only,
+            test_running_job_busy_heartbeat_possible_stale_warning,
+            test_running_job_recent_running_heartbeat_not_stale,
+            test_lease_expired_auto_repair_disabled_blocks_only,
+            test_lease_expired_auto_repair_enabled_resets_retryable,
             test_running_job_guard_blocks_claim,
             test_existing_oom_policy_script_passes,
         ):

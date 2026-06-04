@@ -97,6 +97,16 @@ def auto_repair_stale_running_enabled() -> bool:
     return os.environ.get("AUGSEG_AUTO_REPAIR_STALE_RUNNING", "0") == "1"
 
 
+def job_heartbeat_detail(job: dict, parsed: dict | None = None) -> str:
+    parsed = parsed or {}
+    log_path = parsed.get("log") or f".scheduler_runs/logs/{job['job_id']}.log"
+    return (
+        f"job_id={job['job_id']} config_id={job['config_id']} "
+        f"server_name={job.get('server_name')} gpu_id={job.get('gpu_id')} "
+        f"log_path={log_path}"
+    )
+
+
 def interruptible_sleep(seconds: int | float, state: WorkerRuntimeState) -> bool:
     deadline = time.monotonic() + max(float(seconds), 0.0)
     while not state.shutdown_requested and time.monotonic() < deadline:
@@ -406,28 +416,42 @@ def main() -> int:
         if pg_db:
             running = pg_db.find_running_job_for_worker(worker_id, args.server_name, args.gpu_id)
             if running:
+                child = RUNTIME_STATE.current_child
+                decision = pg_db.evaluate_running_job_blocker(
+                    running,
+                    worker_id,
+                    args.server_name,
+                    args.gpu_id,
+                    current_job_id=RUNTIME_STATE.current_job_id,
+                    child_alive=bool(child is not None and child.poll() is None),
+                )
                 detail = (
-                    f"existing running job job_id={running['job_id']} "
-                    f"config_id={running['config_id']} worker_id={running['worker_id']} "
-                    f"server_name={running['server_name']} gpu_id={running['gpu_id']}"
+                    f"{pg_db.running_job_detail(running)} reason={decision['reason']} "
+                    f"auto_repair={int(auto_repair_stale_running_enabled())}"
                 )
-                same_slot = (
-                    running["worker_id"] == worker_id
-                    and running["server_name"] == args.server_name
-                    and int(running["gpu_id"]) == int(args.gpu_id)
-                )
-                if same_slot and auto_repair_stale_running_enabled():
+                if decision["stale"] and auto_repair_stale_running_enabled():
                     print(f"AUTO_REPAIR_STALE_RUNNING {detail}", flush=True)
-                    pg_db.report_interrupted(running["job_id"], worker_id, "Interrupted/stale running job reset to retryable")
-                    pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "auto_repaired_stale_running", detail)
+                    repaired = pg_db.auto_repair_stale_running_job(
+                        running["job_id"],
+                        worker_id,
+                        args.server_name,
+                        args.gpu_id,
+                    )
+                    pg_db.heartbeat(
+                        worker_id,
+                        args.server_name,
+                        args.gpu_id,
+                        "auto_repaired_stale_running" if repaired else "auto_repair_stale_running_rejected",
+                        detail,
+                    )
                     continue
-                print(f"BLOCKED_STALE_RUNNING {detail}")
+                print(f"{decision['worker_status'].upper()} {detail}", flush=True)
                 pg_db.heartbeat(
                     worker_id,
                     args.server_name,
                     args.gpu_id,
-                    "blocked_stale_running",
-                    "running job exists; manual repair required",
+                    decision["worker_status"],
+                    detail,
                 )
                 if args.once:
                     return 1
@@ -454,7 +478,7 @@ def main() -> int:
         print(f"JOB_ASSIGNED {json.dumps(job, sort_keys=True)}")
         RUNTIME_STATE.set_current_job(job, worker_id)
         if pg_db:
-            pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "running", job["job_id"])
+            pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "running", job_heartbeat_detail(job))
         ok, parsed, detail = run_job(
             job,
             coordinator_url=None if pg_db else args.coordinator_url,
@@ -463,7 +487,7 @@ def main() -> int:
             runtime_state=RUNTIME_STATE,
             heartbeat_fn=(
                 lambda: (
-                    pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "running", job["job_id"]),
+                    pg_db.heartbeat(worker_id, args.server_name, args.gpu_id, "running", job_heartbeat_detail(job)),
                     pg_db.renew_job_lease(job["job_id"], worker_id),
                 )
             )

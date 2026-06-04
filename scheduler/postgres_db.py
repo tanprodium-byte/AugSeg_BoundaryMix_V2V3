@@ -32,6 +32,10 @@ ERROR_CLASS_PATTERNS = (
 )
 _INIT_DONE = False
 DB_RETRY_ATTEMPTS = 5
+AUTO_REPAIR_STALE_ERROR = "Auto-repaired stale running job after worker restart/lease expiry"
+STALE_HEARTBEAT_MINUTES_ENV = "AUGSEG_STALE_RUNNING_HEARTBEAT_MINUTES"
+DEFAULT_STALE_HEARTBEAT_MINUTES = 30
+RUNNING_HEARTBEAT_STATUS = "running"
 
 
 def _db_url() -> str:
@@ -138,6 +142,14 @@ def oom_cooldown_interval() -> timedelta:
     return timedelta(minutes=max(minutes, 0.0))
 
 
+def stale_heartbeat_interval() -> timedelta:
+    try:
+        minutes = float(os.environ.get(STALE_HEARTBEAT_MINUTES_ENV, str(DEFAULT_STALE_HEARTBEAT_MINUTES)))
+    except ValueError:
+        minutes = DEFAULT_STALE_HEARTBEAT_MINUTES
+    return timedelta(minutes=max(minutes, 1.0))
+
+
 def is_oom_error(error: str | None) -> bool:
     text = error or ""
     lowered = text.lower()
@@ -167,21 +179,172 @@ def short_oom_error(error: str | None) -> str:
     return text if text.lower() == "oom" else "OOM"
 
 
+def _running_job_select_sql() -> str:
+    return """
+            SELECT
+              j.job_id,
+              j.config_id,
+              j.worker_id,
+              j.server_name,
+              j.gpu_id,
+              j.started_at,
+              j.lease_until,
+              j.error,
+              h.status AS heartbeat_status,
+              h.last_seen AS heartbeat_last_seen,
+              h.detail AS heartbeat_detail
+            FROM jobs j
+            LEFT JOIN worker_heartbeats h ON h.worker_id=j.worker_id
+            WHERE j.status='running'
+              AND j.finished_at IS NULL
+              AND (j.worker_id=%s OR (j.server_name=%s AND j.gpu_id=%s))
+            ORDER BY j.started_at ASC
+            LIMIT 1
+            """
+
+
 def find_running_job_for_worker(worker_id: str, server_name: str, gpu_id: int) -> dict | None:
     init_db()
     with transaction() as conn:
         return conn.execute(
-            """
-            SELECT job_id, config_id, worker_id, server_name, gpu_id, started_at, lease_until
-            FROM jobs
-            WHERE status='running'
-              AND finished_at IS NULL
-              AND (worker_id=%s OR (server_name=%s AND gpu_id=%s))
-            ORDER BY started_at ASC
-            LIMIT 1
-            """,
+            _running_job_select_sql(),
             (worker_id, server_name, gpu_id),
         ).fetchone()
+
+
+def running_job_detail(row: dict) -> str:
+    return (
+        f"job_id={row['job_id']} config_id={row['config_id']} "
+        f"worker_id={row['worker_id']} server_name={row['server_name']} gpu_id={row['gpu_id']} "
+        f"started_at={row.get('started_at')} lease_until={row.get('lease_until')} "
+        f"heartbeat_status={row.get('heartbeat_status')} heartbeat_last_seen={row.get('heartbeat_last_seen')}"
+    )
+
+
+def evaluate_running_job_blocker(
+    row: dict,
+    worker_id: str,
+    server_name: str,
+    gpu_id: int,
+    now=None,
+    current_job_id: str | None = None,
+    child_alive: bool = False,
+) -> dict:
+    same_worker = row["worker_id"] == worker_id
+    same_slot = row["server_name"] == server_name and int(row["gpu_id"]) == int(gpu_id)
+    owns_exact_slot = same_worker and same_slot
+    is_current_child = child_alive and current_job_id == row["job_id"]
+    now_value = now
+    if now_value is None:
+        with transaction() as conn:
+            now_value = conn.execute("SELECT NOW() AS now").fetchone()["now"]
+
+    lease_until = row.get("lease_until")
+    lease_expired = bool(lease_until is not None and lease_until <= now_value)
+    hb_status = row.get("heartbeat_status")
+    hb_last_seen = row.get("heartbeat_last_seen")
+    hb_stale = bool(hb_last_seen is None or hb_last_seen <= now_value - stale_heartbeat_interval())
+    hb_not_running = bool(hb_status and hb_status != RUNNING_HEARTBEAT_STATUS)
+    possible_stale = bool(lease_expired or hb_stale or hb_not_running)
+    stale = bool(owns_exact_slot and not is_current_child and (lease_expired or hb_stale))
+
+    reasons = []
+    if not owns_exact_slot:
+        reasons.append("running job is not exact current worker/server/gpu ownership")
+    if is_current_child:
+        reasons.append("worker still has matching current child process")
+    if lease_expired:
+        reasons.append("lease expired")
+    if hb_stale:
+        reasons.append("heartbeat missing or stale")
+    if hb_not_running:
+        reasons.append(f"heartbeat status is {hb_status}")
+    if not possible_stale:
+        reasons.append("lease and heartbeat are recent")
+
+    return {
+        "same_worker": same_worker,
+        "same_slot": same_slot,
+        "owns_exact_slot": owns_exact_slot,
+        "is_current_child": is_current_child,
+        "lease_expired": lease_expired,
+        "heartbeat_stale": hb_stale,
+        "heartbeat_not_running": hb_not_running,
+        "possible_stale": possible_stale,
+        "stale": stale,
+        "worker_status": "blocked_stale_running" if possible_stale else "blocked_running_job",
+        "reason": "; ".join(reasons),
+    }
+
+
+def auto_repair_stale_running_job(job_id: str, worker_id: str, server_name: str, gpu_id: int) -> bool:
+    init_db()
+    with transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT
+              j.job_id,
+              j.config_id,
+              j.worker_id,
+              j.server_name,
+              j.gpu_id,
+              j.started_at,
+              j.lease_until,
+              h.status AS heartbeat_status,
+              h.last_seen AS heartbeat_last_seen,
+              h.detail AS heartbeat_detail,
+              c.status AS config_status,
+              NOW() AS now
+            FROM jobs j
+            JOIN configs c ON c.config_id=j.config_id
+            LEFT JOIN worker_heartbeats h ON h.worker_id=j.worker_id
+            WHERE j.job_id=%s
+              AND j.status='running'
+              AND j.finished_at IS NULL
+              AND c.status='running'
+            FOR UPDATE OF j, c
+            """,
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        decision = evaluate_running_job_blocker(row, worker_id, server_name, gpu_id, now=row["now"])
+        if not decision["stale"]:
+            return False
+
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status='failed',
+                finished_at=NOW(),
+                error=%s
+            WHERE job_id=%s
+              AND status='running'
+              AND finished_at IS NULL
+              AND worker_id=%s
+              AND server_name=%s
+              AND gpu_id=%s
+            """,
+            (AUTO_REPAIR_STALE_ERROR, job_id, worker_id, server_name, gpu_id),
+        )
+        conn.execute(
+            """
+            UPDATE configs
+            SET status='failed_retryable',
+                worker_id=NULL,
+                lease_until=NULL,
+                attempts=0,
+                last_error=%s,
+                last_error_class='interrupted',
+                next_retry_at=NOW(),
+                updated_at=NOW()
+            WHERE config_id=%s
+              AND status='running'
+              AND worker_id=%s
+            """,
+            (AUTO_REPAIR_STALE_ERROR, row["config_id"], worker_id),
+        )
+        return True
 
 
 def report_interrupted(job_id: str, worker_id: str, error: str) -> bool:
@@ -476,6 +639,7 @@ def _retry_deadlocks(fn):
 
 init_db = _retry_deadlocks(init_db)
 find_running_job_for_worker = _retry_deadlocks(find_running_job_for_worker)
+auto_repair_stale_running_job = _retry_deadlocks(auto_repair_stale_running_job)
 claim_next_job = _retry_deadlocks(claim_next_job)
 report_done = _retry_deadlocks(report_done)
 report_failed = _retry_deadlocks(report_failed)

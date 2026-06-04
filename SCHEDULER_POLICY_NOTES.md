@@ -15,9 +15,9 @@ Postgres workers must not claim a new job while the database already has a `jobs
 - the same `worker_id`, or
 - the same `server_name` and `gpu_id`.
 
-This protects a GPU after service restart: if the database still has the job running, the restarted worker heartbeats `blocked_stale_running` with `running job exists; manual repair required` and waits instead of launching a second train.
+This protects a GPU after service restart: if the database still has a running job row, the restarted worker waits instead of launching a second train. It heartbeats `blocked_running_job` when the row still looks healthy, or `blocked_stale_running` when lease/heartbeat evidence suggests the row may be stale.
 
-By default, `AUGSEG_AUTO_REPAIR_STALE_RUNNING=0`; the worker does not reset production running rows automatically. If explicitly set to `1`, the worker may repair only a stale running job for its exact `worker_id`, `server_name`, and `gpu_id`.
+By default, `AUGSEG_AUTO_REPAIR_STALE_RUNNING=0`; the worker does not reset production running rows automatically. If explicitly set to `1`, the worker may repair only a stale running job for its exact `worker_id`, `server_name`, and `gpu_id`, and only when the worker has no matching current child process and the lease or heartbeat is stale.
 
 ## Graceful systemd stop
 
@@ -124,7 +124,22 @@ The repair script does not print the DB URL and does not touch configs with a ru
 
 ## Stale running repair
 
-A stale running job is a Postgres row where `jobs.status='running'` and `configs.status='running'`, but no current worker child process is responsible for that job anymore. This can happen if a previous worker was stopped before it could report the interruption.
+A real running job has both:
+
+- `jobs.status='running'` / `configs.status='running'`
+- a live scheduler worker child process responsible for that `job_id` on the recorded `worker_id`, `server_name`, and `gpu_id`
+
+A stale running job is a Postgres row where `jobs.status='running'` and `configs.status='running'`, but no current worker child process is responsible for that job anymore. This can happen after worker restart, SIGKILL, OOM-kill, host reboot, or a child process dying before it reports done/failed/interrupted.
+
+Do not use generic `nvidia-smi` process ownership to decide that a scheduler job is real. A GPU may be occupied by another user's process while the scheduler DB still contains an old running row. The scheduler only treats a row as repairable when ownership matches the current worker/server/GPU and lease/heartbeat evidence is stale.
+
+Read-only diagnosis:
+
+```bash
+python scripts/diagnose_running_jobs.py
+```
+
+`POSSIBLE_STALE_RUNNING` means the DB has a running job whose worker heartbeat is missing, stale, or no longer `running`, or whose lease has expired. It is a warning, not a process kill decision.
 
 Dry-run the current stale job first:
 
@@ -132,15 +147,33 @@ Dry-run the current stale job first:
 cd /home/islabworker3/tantv/AugSeg_BoundaryMix_V2V3
 source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
 python scripts/reset_stale_running_job_to_retryable.py --config-id v2_component_weighting --worker-id supermaster:gpu0 --dry-run
+python scripts/reset_stale_running_job_to_retryable.py --config-id v2_v3_best_template --worker-id islab-server3:gpu0 --dry-run
 ```
 
 Apply only after reviewing the dry-run output:
 
 ```bash
 python scripts/reset_stale_running_job_to_retryable.py --config-id v2_component_weighting --worker-id supermaster:gpu0 --apply
+python scripts/reset_stale_running_job_to_retryable.py --config-id v2_v3_best_template --worker-id islab-server3:gpu0 --apply
 ```
 
 After repair, `scheduler/status_postgres.py` will show the config as `failed_retryable`; the scheduler can run it again when GPU free VRAM is high enough.
+
+Auto repair remains off by default to avoid resetting a production job incorrectly. To enable it explicitly for a worker, set:
+
+```text
+AUGSEG_AUTO_REPAIR_STALE_RUNNING=1
+```
+
+When enabled, repair updates only the selected running row:
+
+- `jobs.status='failed'`
+- `jobs.error='Auto-repaired stale running job after worker restart/lease expiry'`
+- `configs.status='failed_retryable'`
+- `configs.worker_id=NULL`
+- `configs.attempts=0`
+- `configs.last_error_class='interrupted'`
+- `configs.next_retry_at=NOW()`
 
 ## Safe deploy order
 
@@ -188,7 +221,8 @@ These tests do not run training:
 ```bash
 python -m py_compile scheduler/postgres_db.py scheduler/worker.py scheduler/status_postgres.py
 python scripts/test_postgres_scheduler_policy.py
-python -m py_compile scheduler/postgres_db.py scheduler/worker.py scheduler/run_train_job.py scheduler/status_postgres.py scripts/diagnose_recent_failed_jobs.py scripts/reset_returncode1_failed_final_to_retryable.py scripts/reset_stale_running_job_to_retryable.py scripts/test_scheduler_signal_and_stale_policy.py
+python -m py_compile scheduler/postgres_db.py scheduler/worker.py scheduler/run_train_job.py scheduler/status_postgres.py scripts/diagnose_recent_failed_jobs.py scripts/diagnose_running_jobs.py scripts/reset_returncode1_failed_final_to_retryable.py scripts/reset_stale_running_job_to_retryable.py scripts/test_scheduler_signal_and_stale_policy.py
 python scripts/diagnose_recent_failed_jobs.py --limit 10
+python scripts/diagnose_running_jobs.py
 python scripts/test_scheduler_signal_and_stale_policy.py
 ```
