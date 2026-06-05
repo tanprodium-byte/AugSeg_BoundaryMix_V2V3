@@ -12,8 +12,8 @@ dataset:
     crop:
       type: rand
       size:
-      - 321
-      - 321
+      - 513
+      - 513
     strong_aug:
       num_augs: 3
       flag_use_random_num_sampling: true
@@ -55,8 +55,7 @@ trainer:
     use_cutmix_trigger_prob: 1.0
 saver:
   auto_resume: true
-  auto_profile_dir: true
-  snapshot_dir: ../../../../exp_boundary_mix_v2_v3/v2_component_weighting
+  snapshot_dir: ./exp_smoke/real_single_gpu_gbs8/v2_component_weighting
   pretrain: ''
   use_tb: false
 criterion:
@@ -100,12 +99,11 @@ checkpoint:
   save_latest: true
   save_best: true
 hf:
-  enabled: true
-  auto_profile_path: true
+  enabled: false
   repo_id: tanprodium/augseg-checkpoints
   repo_type: model
-  auto_download: true
-  auto_upload: true
+  auto_download: false
+  auto_upload: false
   upload_every_epoch: true
   keep_only_latest: true
   bundle_name: latest.tar.gz

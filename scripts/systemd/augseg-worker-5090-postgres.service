@@ -1,0 +1,23 @@
+[Unit]
+Description=AugSeg BoundaryMix RTX 5090 Postgres Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
+Environment=PYTHONUNBUFFERED=1
+Environment=AUGSEG_REQUIRED_FREE_VRAM_MB=26000
+Environment=AUGSEG_OOM_COOLDOWN_MINUTES=10
+Environment=AUGSEG_JOB_LEASE_HOURS=48
+Environment=AUGSEG_AUTO_REPAIR_STALE_RUNNING=0
+# KillMode=mixed sends SIGTERM to the main worker first so it can report
+# interrupted/retryable; after TimeoutStopSec systemd may SIGKILL the cgroup.
+KillMode=mixed
+TimeoutStopSec=180
+ExecStart=/bin/bash -lc 'source ~/.secrets/augseg_scheduler.env && conda run -n augseg-bm python scheduler/worker.py --backend postgres --server-name supermaster --gpu-id 0 --loop --sleep-sec 15'
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

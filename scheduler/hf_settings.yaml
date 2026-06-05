@@ -1,0 +1,5 @@
+repo_id: tanprodium/augseg-boundarymix-v2v3-runs
+repo_type: model
+base_path: voc5_single_gpu_gbs8
+upload_checkpoint_every_epoch: false
+upload_after_segment: true

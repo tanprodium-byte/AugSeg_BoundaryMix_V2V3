@@ -12,8 +12,8 @@ dataset:
     crop:
       type: rand
       size:
-      - 321
-      - 321
+      - 513
+      - 513
     strong_aug:
       num_augs: 3
       flag_use_random_num_sampling: true
@@ -55,8 +55,7 @@ trainer:
     use_cutmix_trigger_prob: 1.0
 saver:
   auto_resume: true
-  auto_profile_dir: true
-  snapshot_dir: ../../../../exp_boundary_mix_v2_v3/v2_component_weighting
+  snapshot_dir: ./exp_smoke/real_single_gpu_gbs8/v2_v3_best_template
   pretrain: ''
   use_tb: false
 criterion:
@@ -90,26 +89,25 @@ wandb:
   enable: false
   project: AugsegResearch
   entity: tanprodium-uit
-  name: boundary_mix_v2_component_weighting
+  name: boundary_mix_v2_v3_best_template
   log_every: 50
 run:
-  name: boundary_mix_v2_component_weighting
+  name: boundary_mix_v2_v3_best_template
   log_every: 50
 checkpoint:
   auto_resume: true
   save_latest: true
   save_best: true
 hf:
-  enabled: true
-  auto_profile_path: true
+  enabled: false
   repo_id: tanprodium/augseg-checkpoints
   repo_type: model
-  auto_download: true
-  auto_upload: true
+  auto_download: false
+  auto_upload: false
   upload_every_epoch: true
   keep_only_latest: true
   bundle_name: latest.tar.gz
-  path_in_repo: boundary_mix_v2_v3/voc_semi662/v2_component_weighting/latest.tar.gz
+  path_in_repo: boundary_mix_v2_v3/voc_semi662/v2_v3_best_template/latest.tar.gz
   squash_after_upload: false
 boundary_mix:
   enabled: false
@@ -127,9 +125,22 @@ boundary_component:
   use_mean_confidence_in_q: true
   base_pixel_weight: one
   weight_mode: soft
-  force_q_one: false
-  eps: 1.0e-06
   debug_log: true
-  debug_first_batches: 3
 boundary_compatibility:
-  enabled: false
+  enabled: true
+  semantic_metric: js
+  band_width: 3
+  pair_mode: radius
+  pair_radius: 2
+  topk: 5
+  max_pairs_per_image: 2048
+  tau_same: 0.8
+  tau_diff: 0.3
+  margin: 0.4
+  lambda_bcr: 0.01
+  use_confidence_gate: true
+  use_component_gate: true
+  feature_layer: decoder
+  detach_teacher_distribution: true
+  detach_gate: true
+  debug_log: true

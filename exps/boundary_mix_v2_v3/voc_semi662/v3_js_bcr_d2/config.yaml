@@ -3,13 +3,17 @@ dataset:
   train:
     data_root: ./data/VOC2012
     data_list: ./data/splitsall/pascal_u2pl/662/labeled.txt
-    batch_size: 2
+    batch_size: 8
     flip: true
-    rand_resize: [0.5, 2.0]
+    rand_resize:
+    - 0.5
+    - 2.0
     resize_base_size: 500
     crop:
       type: rand
-      size: [513, 513]
+      size:
+      - 321
+      - 321
     strong_aug:
       num_augs: 3
       flag_use_random_num_sampling: true
@@ -19,8 +23,14 @@ dataset:
     batch_size: 1
   n_sup: 662
   workers: 4
-  mean: [0.485, 0.456, 0.406]
-  std: [0.229, 0.224, 0.225]
+  mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  std:
+  - 0.229
+  - 0.224
+  - 0.225
   ignore_label: 255
 trainer:
   epochs: 80
@@ -45,6 +55,7 @@ trainer:
     use_cutmix_trigger_prob: 1.0
 saver:
   auto_resume: true
+  auto_profile_dir: true
   snapshot_dir: ../../../../exp_boundary_mix_v2_v3/v3_js_bcr_d2
   pretrain: ''
   use_tb: false
@@ -62,15 +73,21 @@ net:
     kwargs:
       zero_init_residual: true
       multi_grid: true
-      replace_stride_with_dilation: [false, false, true]
+      replace_stride_with_dilation:
+      - false
+      - false
+      - true
   decoder:
     type: augseg.models.decoder.dec_deeplabv3_plus
     kwargs:
       inner_planes: 256
       low_conv_planes: 48
-      dilations: [6, 12, 18]
+      dilations:
+      - 6
+      - 12
+      - 18
 wandb:
-  enable: true
+  enable: false
   project: AugsegResearch
   entity: tanprodium-uit
   name: boundary_mix_v3_js_bcr_d2
@@ -84,6 +101,7 @@ checkpoint:
   save_best: true
 hf:
   enabled: true
+  auto_profile_path: true
   repo_id: tanprodium/augseg-checkpoints
   repo_type: model
   auto_download: true
@@ -117,4 +135,3 @@ boundary_compatibility:
   detach_teacher_distribution: true
   detach_gate: true
   debug_log: true
-
