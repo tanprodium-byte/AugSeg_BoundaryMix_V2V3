@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3
 Environment=PYTHONUNBUFFERED=1
-Environment=AUGSEG_REQUIRED_FREE_VRAM_MB=28000
+Environment=AUGSEG_REQUIRED_FREE_VRAM_MB=26000
 Environment=AUGSEG_OOM_COOLDOWN_MINUTES=10
 Environment=AUGSEG_JOB_LEASE_HOURS=48
 Environment=AUGSEG_AUTO_REPAIR_STALE_RUNNING=0

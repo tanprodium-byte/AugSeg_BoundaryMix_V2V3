@@ -2,7 +2,9 @@ import argparse
 import yaml
 import os
 import os.path as osp
+import posixpath
 import pprint
+import re
 
 import torch
 import torch.distributed as dist
@@ -216,6 +218,93 @@ def build_iter_log_columns():
 ITER_LOG_COLUMNS = build_iter_log_columns()
 
 
+def _safe_path_token(value):
+    token = re.sub(r"[^A-Za-z0-9]+", "_", str(value).strip().lower())
+    return token.strip("_") or "unknown"
+
+
+def _get_backbone_token(cfg):
+    encoder_type = cfg.get("net", {}).get("encoder", {}).get("type", "")
+    if encoder_type == "augseg.models.resnet.resnet101":
+        return "r101"
+    if encoder_type == "augseg.models.resnet.resnet50":
+        return "r50"
+
+    short_name = str(encoder_type).split(".")[-1]
+    return _safe_path_token(short_name)
+
+
+def _get_crop_token(cfg):
+    crop_size = cfg.get("dataset", {}).get("train", {}).get("crop", {}).get("size", [])
+    if not isinstance(crop_size, (list, tuple)) or len(crop_size) != 2:
+        return "cunknown"
+
+    h, w = int(crop_size[0]), int(crop_size[1])
+    if h == w:
+        return f"c{h}"
+    return f"c{h}x{w}"
+
+
+def _get_runtime_profile_token(cfg, world_size):
+    per_gpu_batch = int(cfg.get("dataset", {}).get("train", {}).get("batch_size", 1))
+    world_size = int(world_size)
+    global_batch = per_gpu_batch * world_size
+    return (
+        f"{_get_backbone_token(cfg)}_{_get_crop_token(cfg)}_"
+        f"bs{per_gpu_batch}x{world_size}_gbs{global_batch}"
+    )
+
+
+def _append_profile_to_hf_path(path_in_repo, profile):
+    if not path_in_repo:
+        return path_in_repo
+
+    path_parts = [part for part in str(path_in_repo).split("/") if part]
+    if profile in path_parts:
+        return path_in_repo
+
+    repo_dir, filename = posixpath.split(str(path_in_repo))
+    if not filename:
+        return posixpath.join(repo_dir, profile)
+    return posixpath.join(repo_dir, profile, filename)
+
+
+def _append_profile_to_snapshot_dir(snapshot_dir, profile):
+    if not snapshot_dir:
+        return snapshot_dir
+
+    normalized_parts = [part for part in osp.normpath(str(snapshot_dir)).split(os.sep) if part]
+    if profile in normalized_parts:
+        return snapshot_dir
+
+    parent, basename = osp.split(str(snapshot_dir).rstrip(os.sep))
+    if basename == profile or basename.endswith(f"_{profile}"):
+        return snapshot_dir
+    profiled_basename = f"{basename}_{profile}" if basename else profile
+    return osp.join(parent, profiled_basename) if parent else profiled_basename
+
+
+def apply_runtime_profile_paths(cfg, world_size):
+    profile = _get_runtime_profile_token(cfg, world_size)
+
+    cfg.setdefault("saver", {})
+    cfg.setdefault("hf", {})
+
+    if bool(cfg["saver"].get("auto_profile_dir", False)):
+        cfg["saver"]["snapshot_dir"] = _append_profile_to_snapshot_dir(
+            cfg["saver"].get("snapshot_dir", ""),
+            profile,
+        )
+
+    if bool(cfg["hf"].get("auto_profile_path", False)):
+        cfg["hf"]["path_in_repo"] = _append_profile_to_hf_path(
+            cfg["hf"].get("path_in_repo", ""),
+            profile,
+        )
+
+    return profile
+
+
 def make_default_iter_log_dict(
     sup_loss,
     uns_loss,
@@ -303,6 +392,21 @@ def main(in_args):
     # 1. output settings
     ###########################
     cfg["exp_path"] = osp.dirname(args.config)
+    cfg.setdefault("saver", {})
+    cfg["saver"].setdefault("auto_profile_dir", False)
+    cfg.setdefault("hf", {})
+    cfg["hf"].setdefault("enabled", False)
+    cfg["hf"].setdefault("repo_type", "model")
+    cfg["hf"].setdefault("auto_download", True)
+    cfg["hf"].setdefault("auto_upload", True)
+    cfg["hf"].setdefault("upload_every_epoch", True)
+    cfg["hf"].setdefault("keep_only_latest", True)
+    cfg["hf"].setdefault("bundle_name", "latest.tar.gz")
+    cfg["hf"].setdefault("auto_profile_path", False)
+    cfg["hf"].setdefault("squash_after_upload", False)
+
+    runtime_profile = apply_runtime_profile_paths(cfg, word_size)
+
     cfg["save_path"] = osp.join(cfg["exp_path"], cfg["saver"]["snapshot_dir"])
     cfg["log_path"] = osp.join(cfg["exp_path"], "log")
     flag_use_tb = cfg["saver"]["use_tb"]
@@ -315,16 +419,6 @@ def main(in_args):
     cfg["checkpoint"].setdefault("auto_resume", True)
     cfg["checkpoint"].setdefault("save_latest", True)
     cfg["checkpoint"].setdefault("save_best", True)
-
-    cfg.setdefault("hf", {})
-    cfg["hf"].setdefault("enabled", False)
-    cfg["hf"].setdefault("repo_type", "model")
-    cfg["hf"].setdefault("auto_download", True)
-    cfg["hf"].setdefault("auto_upload", True)
-    cfg["hf"].setdefault("upload_every_epoch", True)
-    cfg["hf"].setdefault("keep_only_latest", True)
-    cfg["hf"].setdefault("bundle_name", "latest.tar.gz")
-    cfg["hf"].setdefault("squash_after_upload", False)
 
     cfg.setdefault("boundary_mix", {})
     cfg["boundary_mix"].setdefault("enabled", False)
@@ -375,6 +469,19 @@ def main(in_args):
     cfg["boundary_compatibility"].setdefault("detach_gate", True)
     cfg["boundary_compatibility"].setdefault("eps", 1e-6)
     cfg["boundary_compatibility"].setdefault("debug_log", False)
+
+    if rank == 0:
+        crop_size = cfg.get("dataset", {}).get("train", {}).get("crop", {}).get("size", [])
+        per_gpu_batch = int(cfg.get("dataset", {}).get("train", {}).get("batch_size", 1))
+        global_batch = per_gpu_batch * int(word_size)
+        print(
+            f"[profile] runtime_profile={runtime_profile} crop={crop_size} "
+            f"per_gpu_batch={per_gpu_batch} world_size={word_size} global_batch={global_batch}",
+            flush=True,
+        )
+        print(f"[profile] snapshot_dir={cfg['saver'].get('snapshot_dir')}", flush=True)
+        print(f"[profile] save_path={cfg['save_path']}", flush=True)
+        print(f"[profile] hf.path_in_repo={cfg.get('hf', {}).get('path_in_repo')}", flush=True)
     
     if not os.path.exists(cfg["log_path"]) and rank == 0:
         os.makedirs(cfg["log_path"])
