@@ -9,9 +9,12 @@ import selectors
 import signal
 import subprocess
 import sys
+import tarfile
 import time
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -184,17 +187,26 @@ def promote_latest(config_id: str, artifact_dir: str) -> str | None:
     repo_id = settings["repo_id"]
     repo_type = settings.get("repo_type", "model")
     base_path = settings.get("base_path", "voc5_single_gpu_gbs8").strip("/")
-    latest_prefix = f"{base_path}/{config_id}/latest"
+    artifact_path = Path(artifact_dir)
+    config_path = artifact_path / "config.yaml"
+    latest_path = None
+    if config_path.is_file():
+        cfg = yaml.safe_load(config_path.read_text())
+        latest_path = cfg.get("hf", {}).get("path_in_repo")
+    latest_path = str(latest_path).strip("/") if latest_path else f"{base_path}/{config_id}/latest.tar.gz"
     api = HfApi(token=os.environ.get("HF_TOKEN"))
-    for path in sorted(Path(artifact_dir).glob("*")):
-        if path.is_file():
-            api.upload_file(
-                path_or_fileobj=str(path),
-                path_in_repo=f"{latest_prefix}/{path.name}",
-                repo_id=repo_id,
-                repo_type=repo_type,
-            )
-    return latest_prefix
+    bundle_path = artifact_path / "latest.tar.gz"
+    with tarfile.open(bundle_path, "w:gz") as tar:
+        for path in sorted(artifact_path.glob("*")):
+            if path.is_file() and path.resolve() != bundle_path.resolve():
+                tar.add(path, arcname=path.name)
+    api.upload_file(
+        path_or_fileobj=str(bundle_path),
+        path_in_repo=latest_path,
+        repo_id=repo_id,
+        repo_type=repo_type,
+    )
+    return latest_path
 
 
 def post_json(coordinator_url: str, endpoint: str, payload: dict, timeout: int = 30) -> dict:

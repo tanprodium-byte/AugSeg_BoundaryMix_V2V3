@@ -9,6 +9,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 
 import yaml
@@ -128,7 +129,32 @@ def collect_artifacts(job_id: str, config_id: str, job_config: Path) -> tuple[Pa
     return save_dir, copied
 
 
-def upload_job_artifacts(job_id: str, config_id: str, artifact_dir: Path, files: list[Path], progress: dict) -> str | None:
+def make_tarball(artifact_dir: Path, tar_path: Path) -> Path:
+    with tarfile.open(tar_path, "w:gz") as tar:
+        for path in sorted(artifact_dir.glob("*")):
+            if path.is_file() and path.resolve() != tar_path.resolve():
+                tar.add(path, arcname=path.name)
+    return tar_path
+
+
+def config_hf_latest_path(job_config: Path, config_id: str) -> str:
+    cfg = yaml.safe_load(job_config.read_text())
+    configured = cfg.get("hf", {}).get("path_in_repo")
+    if configured:
+        return str(configured).strip("/")
+
+    settings = load_hf_settings()
+    base_path = settings.get("base_path", "voc5_single_gpu_gbs8").strip("/")
+    return f"{base_path}/{config_id}/latest.tar.gz"
+
+
+def upload_job_artifacts(
+    job_id: str,
+    config_id: str,
+    job_config: Path,
+    artifact_dir: Path,
+    progress: dict,
+) -> str | None:
     try:
         from huggingface_hub import HfApi
     except Exception as exc:
@@ -139,18 +165,19 @@ def upload_job_artifacts(job_id: str, config_id: str, artifact_dir: Path, files:
         return None
     repo_id = settings["repo_id"]
     repo_type = settings.get("repo_type", "model")
-    base_path = settings.get("base_path", "voc5_single_gpu_gbs8").strip("/")
     api = HfApi(token=os.environ.get("HF_TOKEN"))
 
     progress_path = artifact_dir / "progress.json"
     progress_path.write_text(json.dumps(progress, indent=2, sort_keys=True) + "\n")
-    files = list(files) + [progress_path]
 
-    job_prefix = f"{base_path}/{config_id}/jobs/{job_id}"
-    for path in files:
-        rel_name = path.name
-        api.upload_file(path_or_fileobj=str(path), path_in_repo=f"{job_prefix}/{rel_name}", repo_id=repo_id, repo_type=repo_type)
-    return job_prefix
+    latest_path = config_hf_latest_path(job_config, config_id)
+    if latest_path.endswith("/latest.tar.gz"):
+        job_path = latest_path[: -len("/latest.tar.gz")] + f"/jobs/{job_id}.tar.gz"
+    else:
+        job_path = f"{latest_path.rstrip('/')}/jobs/{job_id}.tar.gz"
+    bundle_path = make_tarball(artifact_dir, artifact_dir / f"{job_id}.tar.gz")
+    api.upload_file(path_or_fileobj=str(bundle_path), path_in_repo=job_path, repo_id=repo_id, repo_type=repo_type)
+    return job_path
 
 
 def main() -> int:
@@ -210,7 +237,7 @@ def main() -> int:
         "seconds": round(time.time() - started, 3),
         "log": str(log_path),
     }
-    job_hf_path = upload_job_artifacts(args.job_id, args.config_id, artifact_dir, files, progress)
+    job_hf_path = upload_job_artifacts(args.job_id, args.config_id, job_config, artifact_dir, progress)
     print(json.dumps({"status": "success", "job_hf_path": job_hf_path, "artifact_dir": str(artifact_dir), "log": str(log_path)}))
     return 0
 
