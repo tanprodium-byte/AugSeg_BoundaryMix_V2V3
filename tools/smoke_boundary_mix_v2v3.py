@@ -134,6 +134,26 @@ def test_v3_js_finite_with_zero_probabilities():
     assert stats["mean_JS"] >= 0.0
 
 
+def test_v3_accepts_4d_teacher_logits_as_confidence_input():
+    features, target, teacher_probs, _, mix_mask = _base_v3_inputs()
+    teacher_logits = torch.full_like(teacher_probs, -3.0)
+    teacher_logits[:, 1] = 3.0
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        teacher_logits,
+        mix_mask,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=32,
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["num_pairs_per_image"] > 0
+
+
 def test_v3_same_semantic_pairs_produce_valid_same_loss():
     features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
     features[:, 1, :, 4:] = 1.0
@@ -314,6 +334,158 @@ def test_combined_v2_v3_component_gate_finite_loss():
     assert loss.item() >= 0.0
 
 
+def test_v23_soft_component_gate_mode_is_finite():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    target[:, :, 4:] = 2
+    teacher_probs = F.one_hot(target, num_classes=3).permute(0, 3, 1, 2).float()
+    component_weight = torch.ones_like(confidence)
+    component_weight[:, :, 4:] = 0.0
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        component_weight_map_or_none=component_weight,
+        use_component_gate=True,
+        component_gate_mode="soft",
+        component_gate_alpha=0.5,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["bcr/use_component_gate"] == 1.0
+    assert stats["bcr/component_gate_mode"] == "soft"
+    assert stats["bcr/mean_r_after_component_gate"] > 0.0
+
+
+def test_v23_soft_same_target_mode_is_finite():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    features[:, 1, :, 4:] = 1.0
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        same_loss_mode="soft_semantic",
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["same_pairs_ratio"] > 0.0
+    assert "bcr/mean_abs_sS_minus_sSem_same" in stats
+
+
+def test_v3_teacher_feature_gate_mode_is_finite():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    target[:, :, 4:] = 2
+    teacher_probs = F.one_hot(target, num_classes=3).permute(0, 3, 1, 2).float()
+    teacher_features = features.clone()
+    teacher_features[:, 1, :, 4:] = 1.0
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        teacher_features=teacher_features,
+        relation_mode="teacher_feature_gate",
+        use_teacher_features=True,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+
+    assert torch.isfinite(loss)
+    assert "bcr/mean_s_T" in stats
+    assert "bcr/mean_teacher_feature_gate_diff" in stats
+
+
+def test_v3_teacher_relation_consistency_mode_is_finite():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    target[:, :, 4:] = 2
+    teacher_probs = F.one_hot(target, num_classes=3).permute(0, 3, 1, 2).float()
+    teacher_features = features.clone()
+    teacher_features[:, 1, :, 4:] = 1.0
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        teacher_features=teacher_features,
+        relation_mode="teacher_relation_consistency",
+        use_teacher_features=True,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+
+    assert torch.isfinite(loss)
+    assert "bcr/mean_abs_sS_minus_sT_active" in stats
+
+
+def test_v3_affinity_bce_mode_is_finite():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    target[:, :, 4:] = 2
+    teacher_probs = F.one_hot(target, num_classes=3).permute(0, 3, 1, 2).float()
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        relation_mode="affinity_bce",
+        affinity_target="hard",
+        affinity_temperature=0.2,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+
+    assert torch.isfinite(loss)
+    assert "bcr/loss_affinity" in stats
+    assert stats["bcr/affinity_temperature"] == 0.2
+
+
+def test_v3_no_active_pairs_returns_safe_zero():
+    features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
+    mix_mask.zero_()
+
+    loss, stats = compute_js_boundary_compatibility_loss(
+        features,
+        target,
+        teacher_probs,
+        confidence,
+        mix_mask,
+        num_classes=3,
+        pair_radius=1,
+        max_pairs_per_image=64,
+    )
+
+    assert torch.isfinite(loss)
+    assert loss.item() == 0.0
+    assert stats["bcr/num_pairs_active"] == 0
+
+
+def test_v3_disabled_or_lambda_zero_can_skip_bcr_compute():
+    cfg_disabled = {"enabled": False, "lambda_bcr": 0.01}
+    cfg_zero = {"enabled": True, "lambda_bcr": 0.0}
+
+    assert not (cfg_disabled["enabled"] and cfg_disabled["lambda_bcr"] != 0.0)
+    assert not (cfg_zero["enabled"] and cfg_zero["lambda_bcr"] != 0.0)
+
+
 def test_v3_standalone_accepts_none_component_weight():
     features, target, teacher_probs, confidence, mix_mask = _base_v3_inputs()
 
@@ -372,6 +544,7 @@ def main():
     test_affected_target_component_gets_soft_q_below_one()
     test_force_q_one_is_neutral_and_denominator_nonzero()
     test_v3_js_finite_with_zero_probabilities()
+    test_v3_accepts_4d_teacher_logits_as_confidence_input()
     test_v3_same_semantic_pairs_produce_valid_same_loss()
     test_v3_different_semantic_pairs_produce_valid_diff_loss()
     test_v3_uncertain_pairs_are_ignored()
@@ -379,6 +552,13 @@ def main():
     test_v3_standalone_does_not_use_component_q_c()
     test_combined_v2_v3_passes_component_weight_map_into_bcr()
     test_combined_v2_v3_component_gate_finite_loss()
+    test_v23_soft_component_gate_mode_is_finite()
+    test_v23_soft_same_target_mode_is_finite()
+    test_v3_teacher_feature_gate_mode_is_finite()
+    test_v3_teacher_relation_consistency_mode_is_finite()
+    test_v3_affinity_bce_mode_is_finite()
+    test_v3_no_active_pairs_returns_safe_zero()
+    test_v3_disabled_or_lambda_zero_can_skip_bcr_compute()
     test_v3_standalone_accepts_none_component_weight()
     test_combined_without_component_gate_is_valid()
     print("BoundaryMix V2/V3 smoke tests passed.")

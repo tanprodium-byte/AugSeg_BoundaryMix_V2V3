@@ -201,6 +201,56 @@ def build_iter_log_columns():
         "aa/ops_per_image",
     ]
 
+    cols.extend([
+        "bcr/num_pairs_candidate",
+        "bcr/num_pairs_sampled",
+        "bcr/num_pairs_active",
+        "bcr/num_pairs_same",
+        "bcr/num_pairs_diff",
+        "bcr/num_pairs_uncertain",
+        "bcr/mean_s_sem",
+        "bcr/mean_s_sem_same",
+        "bcr/mean_s_sem_diff",
+        "bcr/mean_s_S",
+        "bcr/mean_s_S_same",
+        "bcr/mean_s_S_diff",
+        "bcr/mean_r_ab",
+        "bcr/loss_bcr",
+        "bcr/loss_same",
+        "bcr/loss_diff",
+        "bcr/use_component_gate",
+        "bcr/component_gate_mode",
+        "bcr/mean_q_pair_a",
+        "bcr/mean_q_pair_b",
+        "bcr/mean_q_pair_product",
+        "bcr/mean_r_before_component_gate",
+        "bcr/mean_r_after_component_gate",
+        "bcr/mean_abs_sS_minus_sSem_same",
+        "bcr/mean_s_T",
+        "bcr/mean_s_T_same",
+        "bcr/mean_s_T_diff",
+        "bcr/mean_teacher_feature_gate_same",
+        "bcr/mean_teacher_feature_gate_diff",
+        "bcr/mean_abs_sS_minus_sT_active",
+        "bcr/affinity_temperature",
+        "bcr/mean_A_affinity",
+        "bcr/mean_A_same",
+        "bcr/mean_A_diff",
+        "bcr/mean_y_rel",
+        "bcr/loss_affinity",
+        "v2/num_affected_components",
+        "v2/num_affected_pixels",
+        "v2/mean_visible_ratio",
+        "v2/mean_visible_area",
+        "v2/mean_component_confidence",
+        "v2/mean_q_C",
+        "v2/min_q_C",
+        "v2/max_q_C",
+        "v2/loss_mix_v2",
+        "cuda/max_memory_allocated",
+        "cuda/max_memory_reserved",
+    ])
+
     for kid in range(1, 12):
         op_name = AA_OPS.get(kid, f"op{kid}")
         cols.extend([
@@ -464,6 +514,16 @@ def main(in_args):
     cfg["boundary_compatibility"].setdefault("lambda_bcr", 0.01)
     cfg["boundary_compatibility"].setdefault("use_confidence_gate", True)
     cfg["boundary_compatibility"].setdefault("use_component_gate", False)
+    cfg["boundary_compatibility"].setdefault("component_gate_mode", "direct")
+    cfg["boundary_compatibility"].setdefault("component_gate_alpha", 0.5)
+    cfg["boundary_compatibility"].setdefault("component_gate_threshold", 0.1)
+    cfg["boundary_compatibility"].setdefault("same_loss_mode", "hard_one")
+    cfg["boundary_compatibility"].setdefault("relation_mode", "base_margin")
+    cfg["boundary_compatibility"].setdefault("use_teacher_features", False)
+    cfg["boundary_compatibility"].setdefault("teacher_feature_detach", True)
+    cfg["boundary_compatibility"].setdefault("teacher_feature_source", "mixed")
+    cfg["boundary_compatibility"].setdefault("affinity_target", "hard")
+    cfg["boundary_compatibility"].setdefault("affinity_temperature", 0.2)
     cfg["boundary_compatibility"].setdefault("feature_layer", "decoder")
     cfg["boundary_compatibility"].setdefault("detach_teacher_distribution", True)
     cfg["boundary_compatibility"].setdefault("detach_gate", True)
@@ -929,7 +989,11 @@ def train(
     boundary_component_enabled = bool(boundary_component_cfg.get("enabled", False))
     boundary_component_debug_enabled = bool(boundary_component_cfg.get("debug_log", False))
     boundary_compatibility_cfg = cfg.get("boundary_compatibility", {})
-    boundary_compatibility_enabled = bool(boundary_compatibility_cfg.get("enabled", False))
+    boundary_compatibility_lambda = float(boundary_compatibility_cfg.get("lambda_bcr", 0.0))
+    boundary_compatibility_enabled = (
+        bool(boundary_compatibility_cfg.get("enabled", False))
+        and boundary_compatibility_lambda != 0.0
+    )
     boundary_compatibility_debug_enabled = bool(boundary_compatibility_cfg.get("debug_log", False))
     model.train()
     
@@ -969,6 +1033,9 @@ def train(
         u_maxprob_p90 = float("nan")
         u_pseudo_ratio_mean = float("nan")
         bcr_loss = None
+        bcr_stats = None
+        component_stats = None
+        component_loss_value = float("nan")
 
         i_iter = epoch * len(loader_l) + step # total iters till now
         # log schedule (đúng y hệt block W&B phía dưới)
@@ -1153,6 +1220,25 @@ def train(
             # 3. forward concate labeled + unlabeld into student networks
             num_labeled = len(image_l)
             decoder_features_u_strong = None
+            teacher_features_u_strong = None
+            bcr_relation_mode = boundary_compatibility_cfg.get("relation_mode", "base_margin")
+            bcr_use_teacher_features = bool(boundary_compatibility_cfg.get("use_teacher_features", False)) or (
+                bcr_relation_mode in ("teacher_feature_gate", "teacher_relation_consistency")
+            )
+            if boundary_compatibility_enabled and bcr_use_teacher_features:
+                if boundary_compatibility_cfg.get("teacher_feature_source", "mixed") != "mixed":
+                    raise ValueError("boundary_compatibility.teacher_feature_source currently supports 'mixed' only")
+                with torch.no_grad():
+                    model_teacher.eval()
+                    teacher_out = model_teacher(image_u_aug.detach(), return_features=True)
+                    if not isinstance(teacher_out, (tuple, list)) or len(teacher_out) < 3:
+                        raise ValueError("model_teacher(..., return_features=True) must return logits, aux, features")
+                    teacher_feature_dict = teacher_out[2]
+                    if not isinstance(teacher_feature_dict, dict) or "decoder" not in teacher_feature_dict:
+                        raise ValueError("teacher feature output must contain decoder features")
+                    teacher_features_u_strong = teacher_feature_dict["decoder"].detach()
+                    del teacher_out, teacher_feature_dict
+                model.train()
             if flag_extra_weak:
                 if boundary_compatibility_enabled:
                     pred_all, aux_all, feature_all = model(
@@ -1193,6 +1279,9 @@ def train(
 
             # 5. unsupervised loss
             bcr_loss = pred_u_strong.sum() * 0.0
+            bcr_stats = None
+            component_stats = None
+            component_loss_value = float("nan")
             component_weight_for_bcr = None
             if boundary_component_enabled and mix_source_mask is not None:
                 component_eps = float(boundary_component_cfg.get("eps", 1e-6))
@@ -1234,6 +1323,7 @@ def train(
                     reduction="none",
                 )
                 unsup_loss = (component_ce * component_weight).sum() / weighted_loss_denominator
+                component_loss_value = float(unsup_loss.detach().item())
                 pseduo_high_ratio = valid.float().mean()
 
                 do_component_debug = (
@@ -1384,7 +1474,9 @@ def train(
                     teacher_probs_u_aug.detach() if teacher_probs_u_aug is not None else None,
                     logits_u_aug.detach(),
                     mix_source_mask.detach(),
-                    component_weight_map_or_none=component_weight_for_bcr if use_component_gate else None,
+                    component_weight_for_bcr if use_component_gate else None,
+                    teacher_features_u_strong,
+                    boundary_compatibility_cfg,
                     num_classes=cfg["net"]["num_classes"],
                     ignore_index=ignore,
                     band_width=int(boundary_compatibility_cfg.get("band_width", 3)),
@@ -1397,6 +1489,15 @@ def train(
                     margin=float(boundary_compatibility_cfg.get("margin", 0.4)),
                     use_confidence_gate=bool(boundary_compatibility_cfg.get("use_confidence_gate", True)),
                     use_component_gate=use_component_gate,
+                    component_gate_mode=boundary_compatibility_cfg.get("component_gate_mode", "direct"),
+                    component_gate_alpha=float(boundary_compatibility_cfg.get("component_gate_alpha", 0.5)),
+                    component_gate_threshold=float(boundary_compatibility_cfg.get("component_gate_threshold", 0.1)),
+                    same_loss_mode=boundary_compatibility_cfg.get("same_loss_mode", "hard_one"),
+                    relation_mode=boundary_compatibility_cfg.get("relation_mode", "base_margin"),
+                    use_teacher_features=bool(boundary_compatibility_cfg.get("use_teacher_features", False)),
+                    teacher_feature_detach=bool(boundary_compatibility_cfg.get("teacher_feature_detach", True)),
+                    affinity_target=boundary_compatibility_cfg.get("affinity_target", "hard"),
+                    affinity_temperature=float(boundary_compatibility_cfg.get("affinity_temperature", 0.2)),
                     detach_teacher_distribution=bool(boundary_compatibility_cfg.get("detach_teacher_distribution", True)),
                     detach_gate=bool(boundary_compatibility_cfg.get("detach_gate", True)),
                     eps=float(boundary_compatibility_cfg.get("eps", 1e-6)),
@@ -1410,33 +1511,22 @@ def train(
                     )
                 )
                 if do_bcr_debug:
+                    log_items = []
+                    for key in sorted(bcr_stats):
+                        value = bcr_stats[key]
+                        if isinstance(value, float):
+                            log_items.append("%s=%.6f" % (key, value))
+                        else:
+                            log_items.append("%s=%s" % (key, value))
                     logger.info(
-                        "[boundary_compatibility] epoch=%d step=%d global_iter=%d "
-                        "num_pairs_per_image=%.4f same_pairs_ratio=%.4f diff_pairs_ratio=%.4f "
-                        "uncertain_pairs_ratio=%.4f mean_s_sem=%.4f mean_s_F=%.4f "
-                        "mean_r_ab=%.4f mean_JS=%.4f L_BCR=%.6f pair_radius=%d band_width=%d"
-                        % (
-                            epoch,
-                            step,
-                            i_iter,
-                            bcr_stats["num_pairs_per_image"],
-                            bcr_stats["same_pairs_ratio"],
-                            bcr_stats["diff_pairs_ratio"],
-                            bcr_stats["uncertain_pairs_ratio"],
-                            bcr_stats["mean_s_sem"],
-                            bcr_stats["mean_s_F"],
-                            bcr_stats["mean_r_ab"],
-                            bcr_stats["mean_JS"],
-                            bcr_stats["L_BCR"],
-                            bcr_stats["pair_radius"],
-                            bcr_stats["band_width"],
-                        )
+                        "[boundary_compatibility] epoch=%d step=%d global_iter=%d %s"
+                        % (epoch, step, i_iter, " ".join(log_items))
                     )
-            del pred_l, pred_u_strong, label_u_aug, logits_u_aug, decoder_features_u_strong
+            del pred_l, pred_u_strong, label_u_aug, logits_u_aug, decoder_features_u_strong, teacher_features_u_strong
 
         loss = sup_loss + unsup_loss
         if bcr_loss is not None:
-            loss = loss + float(cfg.get("boundary_compatibility", {}).get("lambda_bcr", 0.0)) * bcr_loss
+            loss = loss + boundary_compatibility_lambda * bcr_loss
 
         # update student model
         optimizer.zero_grad()
@@ -1567,6 +1657,28 @@ def train(
 
                             log_dict[f"aa/t_mean/{op_name}"] = float(tv.mean())
                             log_dict[f"aa/t_std/{op_name}"] = float(tv.std())
+
+                if component_stats is not None:
+                    log_dict.update({
+                        "v2/num_affected_components": component_stats.get("num_affected_components", np.nan),
+                        "v2/num_affected_pixels": component_stats.get("num_affected_pixels", np.nan),
+                        "v2/mean_visible_ratio": component_stats.get("visible_ratio_mean", np.nan),
+                        "v2/mean_visible_area": component_stats.get("visible_area_mean", np.nan),
+                        "v2/mean_component_confidence": component_stats.get("mean_confidence_R_C", np.nan),
+                        "v2/mean_q_C": component_stats.get("q_C_mean", np.nan),
+                        "v2/min_q_C": component_stats.get("q_C_min", np.nan),
+                        "v2/max_q_C": component_stats.get("q_C_max", np.nan),
+                        "v2/loss_mix_v2": component_loss_value,
+                    })
+
+                if bcr_stats is not None:
+                    for key, value in bcr_stats.items():
+                        if key in ITER_LOG_COLUMNS:
+                            log_dict[key] = value
+
+                if torch.cuda.is_available():
+                    log_dict["cuda/max_memory_allocated"] = float(torch.cuda.max_memory_allocated(local_rank))
+                    log_dict["cuda/max_memory_reserved"] = float(torch.cuda.max_memory_reserved(local_rank))
 
                 # W&B optional
                 if wandb_run is not None:

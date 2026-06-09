@@ -1,0 +1,158 @@
+dataset:
+  type: pascal_semi
+  train:
+    data_root: ./data/VOC2012
+    data_list: ./data/splitsall/pascal_u2pl/662/labeled.txt
+    batch_size: 8
+    flip: true
+    rand_resize:
+    - 0.5
+    - 2.0
+    resize_base_size: 500
+    crop:
+      type: rand
+      size:
+      - 321
+      - 321
+    strong_aug:
+      num_augs: 3
+      flag_use_random_num_sampling: true
+  val:
+    data_root: ./data/VOC2012
+    data_list: ./data/splitsall/pascal_u2pl/val.txt
+    batch_size: 1
+  n_sup: 662
+  workers: 4
+  mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  std:
+  - 0.229
+  - 0.224
+  - 0.225
+  ignore_label: 255
+trainer:
+  epochs: 80
+  sup_only_epoch: 0
+  evaluate_student: true
+  optimizer:
+    type: SGD
+    kwargs:
+      lr: 0.000125
+      momentum: 0.9
+      weight_decay: 0.0001
+  lr_scheduler:
+    mode: poly
+    kwargs:
+      power: 0.9
+  unsupervised:
+    flag_extra_weak: false
+    threshold: 0.95
+    loss_weight: 1.0
+    use_cutmix: true
+    use_cutmix_adaptive: true
+    use_cutmix_trigger_prob: 1.0
+saver:
+  auto_resume: true
+  auto_profile_dir: true
+  snapshot_dir: ../../../../exp_boundary_mix_v2_v3/v23_d2_soft_qc_gate_a05
+  pretrain: ''
+  use_tb: false
+criterion:
+  type: CELoss
+  kwargs:
+    use_weight: false
+net:
+  num_classes: 21
+  sync_bn: true
+  ema_decay: 0.999
+  encoder:
+    type: augseg.models.resnet.resnet101
+    pretrain: ./pretrained/resnet101.pth
+    kwargs:
+      zero_init_residual: true
+      multi_grid: true
+      replace_stride_with_dilation:
+      - false
+      - false
+      - true
+  decoder:
+    type: augseg.models.decoder.dec_deeplabv3_plus
+    kwargs:
+      inner_planes: 256
+      low_conv_planes: 48
+      dilations:
+      - 6
+      - 12
+      - 18
+wandb:
+  enable: false
+  project: AugsegResearch
+  entity: tanprodium-uit
+  name: boundary_mix_v23_d2_soft_qc_gate_a05
+  log_every: 50
+run:
+  name: boundary_mix_v23_d2_soft_qc_gate_a05
+  log_every: 50
+checkpoint:
+  auto_resume: true
+  save_latest: true
+  save_best: true
+hf:
+  enabled: true
+  auto_profile_path: true
+  repo_id: tanprodium/augseg-checkpoints
+  repo_type: model
+  auto_download: true
+  auto_upload: true
+  upload_every_epoch: true
+  keep_only_latest: true
+  bundle_name: latest.tar.gz
+  path_in_repo: boundary_mix_v2_v3/voc_semi662/v23_d2_soft_qc_gate_a05/latest.tar.gz
+  squash_after_upload: false
+boundary_mix:
+  enabled: false
+  debug: false
+  vis_debug: false
+boundary_component:
+  enabled: true
+  connectivity: 8
+  apply_to: target_only
+  foreground_only: true
+  tau_visible_low: 0.2
+  tau_visible_high: 0.6
+  area_min: 64
+  area_max: 512
+  use_mean_confidence_in_q: true
+  base_pixel_weight: one
+  weight_mode: soft
+  debug_log: true
+boundary_compatibility:
+  enabled: true
+  semantic_metric: js
+  band_width: 3
+  pair_mode: radius
+  pair_radius: 2
+  topk: 5
+  max_pairs_per_image: 2048
+  tau_same: 0.8
+  tau_diff: 0.3
+  margin: 0.4
+  lambda_bcr: 0.01
+  use_confidence_gate: true
+  use_component_gate: true
+  feature_layer: decoder
+  detach_teacher_distribution: true
+  detach_gate: true
+  debug_log: true
+  component_gate_mode: soft
+  component_gate_alpha: 0.5
+  component_gate_threshold: 0.1
+  same_loss_mode: hard_one
+  relation_mode: base_margin
+  use_teacher_features: false
+  teacher_feature_detach: true
+  teacher_feature_source: mixed
+  affinity_target: hard
+  affinity_temperature: 0.2
