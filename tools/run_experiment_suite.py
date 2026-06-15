@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -40,6 +41,26 @@ SMOKE_PROGRESS_PATTERNS = (
     "train",
     "loss",
 )
+FINAL_STATUSES = {
+    "success",
+    "failed",
+    "failed_oom",
+    "failed_traceback",
+    "timeout",
+    "timeout_smoke_ok",
+    "skipped",
+    "skipped_success",
+    "gpu_busy",
+    "failed_stale",
+}
+RETRYABLE_STATUSES = {
+    "failed",
+    "failed_oom",
+    "failed_traceback",
+    "timeout",
+    "gpu_busy",
+    "failed_stale",
+}
 
 
 def utc_now() -> str:
@@ -359,6 +380,7 @@ def run_process(
     env: dict[str, str],
     log_path: Path,
     timeout_sec: int | None,
+    heartbeat: Any | None = None,
 ) -> tuple[int | None, bool]:
     with log_path.open("a", encoding="utf-8") as log:
         proc = subprocess.Popen(
@@ -370,6 +392,8 @@ def run_process(
             text=True,
             start_new_session=True,
         )
+        if heartbeat is not None:
+            heartbeat(proc.pid)
         try:
             return proc.wait(timeout=timeout_sec), False
         except subprocess.TimeoutExpired:
@@ -380,6 +404,14 @@ def run_process(
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
             return proc.returncode, True
+        except KeyboardInterrupt:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+            raise
 
 
 def base_status_record(
@@ -413,6 +445,388 @@ def base_status_record(
     }
 
 
+def db_import():
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+    except Exception as exc:
+        raise RuntimeError(
+            "Postgres queue backend requires psycopg. Install psycopg or use --queue-backend local."
+        ) from exc
+    return psycopg, dict_row
+
+
+class PostgresQueue:
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+        self.psycopg, self.dict_row = db_import()
+
+    def connect(self):
+        return self.psycopg.connect(self.db_url, row_factory=self.dict_row)
+
+    def init_schema(self) -> None:
+        with self.connect() as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext('augseg_experiment_suite_queue_schema'))")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS experiment_suite_queue (
+                      suite_name TEXT NOT NULL,
+                      method TEXT NOT NULL,
+                      group_name TEXT NOT NULL,
+                      config_path TEXT NOT NULL,
+                      mode TEXT NOT NULL,
+                      status TEXT NOT NULL DEFAULT 'pending',
+                      worker_id TEXT,
+                      server_name TEXT,
+                      gpu_id INTEGER,
+                      nproc_per_node INTEGER,
+                      crop_size TEXT,
+                      global_batch_size INTEGER,
+                      command TEXT,
+                      log_path TEXT,
+                      pid INTEGER,
+                      return_code INTEGER,
+                      retries INTEGER NOT NULL DEFAULT 0,
+                      max_retries INTEGER NOT NULL DEFAULT 1,
+                      started_at TIMESTAMPTZ,
+                      ended_at TIMESTAMPTZ,
+                      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                      heartbeat_at TIMESTAMPTZ,
+                      last_error TEXT NOT NULL DEFAULT '',
+                      PRIMARY KEY (suite_name, method, mode)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_experiment_suite_queue_claim
+                    ON experiment_suite_queue (suite_name, mode, status, updated_at)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_experiment_suite_queue_heartbeat
+                    ON experiment_suite_queue (suite_name, mode, status, heartbeat_at)
+                    """
+                )
+
+    def seed(
+        self,
+        registry: dict[str, Any],
+        methods: list[dict[str, Any]],
+        mode: str,
+        nproc_per_node: int,
+        force: bool,
+        max_retries: int,
+    ) -> None:
+        self.init_schema()
+        with self.connect() as conn:
+            with conn.transaction():
+                for method in methods:
+                    crop, global_batch = validate_full_config(method, registry, nproc_per_node)
+                    row = conn.execute(
+                        """
+                        SELECT status FROM experiment_suite_queue
+                        WHERE suite_name=%s AND method=%s AND mode=%s
+                        FOR UPDATE
+                        """,
+                        (registry["suite_name"], method["name"], mode),
+                    ).fetchone()
+                    if row is None:
+                        conn.execute(
+                            """
+                            INSERT INTO experiment_suite_queue (
+                              suite_name, method, group_name, config_path, mode, status,
+                              nproc_per_node, crop_size, global_batch_size, retries,
+                              max_retries, updated_at
+                            )
+                            VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, 0, %s, NOW())
+                            """,
+                            (
+                                registry["suite_name"],
+                                method["name"],
+                                method["group"],
+                                method["config"],
+                                mode,
+                                int(nproc_per_node),
+                                json.dumps(crop),
+                                int(global_batch),
+                                int(max_retries),
+                            ),
+                        )
+                    else:
+                        reset_sql = ", status='pending', worker_id=NULL, server_name=NULL, gpu_id=NULL, pid=NULL, return_code=NULL, started_at=NULL, ended_at=NULL, heartbeat_at=NULL, last_error=''"
+                        conn.execute(
+                            f"""
+                            UPDATE experiment_suite_queue
+                            SET group_name=%s, config_path=%s, nproc_per_node=%s,
+                                crop_size=%s, global_batch_size=%s, max_retries=%s,
+                                updated_at=NOW()
+                                {reset_sql if force else ""}
+                            WHERE suite_name=%s AND method=%s AND mode=%s
+                            """,
+                            (
+                                method["group"],
+                                method["config"],
+                                int(nproc_per_node),
+                                json.dumps(crop),
+                                int(global_batch),
+                                int(max_retries),
+                                registry["suite_name"],
+                                method["name"],
+                                mode,
+                            ),
+                        )
+
+    def mark_stale(self, suite_name: str, mode: str, max_stale_minutes: int) -> int:
+        self.init_schema()
+        with self.connect() as conn:
+            with conn.transaction():
+                result = conn.execute(
+                    """
+                    UPDATE experiment_suite_queue
+                    SET status='failed_stale',
+                        ended_at=NOW(),
+                        updated_at=NOW(),
+                        last_error='running heartbeat stale; process was not killed by queue runner'
+                    WHERE suite_name=%s
+                      AND mode=%s
+                      AND status='running'
+                      AND COALESCE(heartbeat_at, started_at, updated_at) < NOW() - (%s::text || ' minutes')::interval
+                    """,
+                    (suite_name, mode, int(max_stale_minutes)),
+                )
+                return int(result.rowcount or 0)
+
+    def claim_one(
+        self,
+        registry: dict[str, Any],
+        mode: str,
+        worker_id: str,
+        server_name: str,
+        gpu: int,
+        retry_failed: bool,
+        max_retries: int,
+    ) -> dict[str, Any] | None:
+        self.init_schema()
+        retry_statuses = tuple(sorted(RETRYABLE_STATUSES))
+        with self.connect() as conn:
+            with conn.transaction():
+                row = conn.execute(
+                    """
+                    WITH candidate AS (
+                      SELECT suite_name, method, mode
+                      FROM experiment_suite_queue
+                      WHERE suite_name=%s
+                        AND mode=%s
+                        AND (
+                          status='pending'
+                          OR (
+                            %s
+                            AND status = ANY(%s)
+                            AND retries < LEAST(max_retries, %s)
+                          )
+                        )
+                      ORDER BY updated_at ASC, method ASC
+                      FOR UPDATE SKIP LOCKED
+                      LIMIT 1
+                    )
+                    UPDATE experiment_suite_queue q
+                    SET status='running',
+                        worker_id=%s,
+                        server_name=%s,
+                        gpu_id=%s,
+                        pid=NULL,
+                        return_code=NULL,
+                        started_at=NOW(),
+                        ended_at=NULL,
+                        updated_at=NOW(),
+                        heartbeat_at=NOW(),
+                        last_error='',
+                        retries=q.retries + CASE WHEN q.status='pending' THEN 0 ELSE 1 END
+                    FROM candidate
+                    WHERE q.suite_name=candidate.suite_name
+                      AND q.method=candidate.method
+                      AND q.mode=candidate.mode
+                    RETURNING q.*
+                    """,
+                    (
+                        registry["suite_name"],
+                        mode,
+                        bool(retry_failed),
+                        list(retry_statuses),
+                        int(max_retries),
+                        worker_id,
+                        server_name,
+                        int(gpu),
+                    ),
+                ).fetchone()
+                return dict(row) if row else None
+
+    def update_running(
+        self,
+        suite_name: str,
+        method: str,
+        mode: str,
+        **fields: Any,
+    ) -> None:
+        if not fields:
+            return
+        allowed = {
+            "command",
+            "log_path",
+            "pid",
+            "nproc_per_node",
+            "crop_size",
+            "global_batch_size",
+            "status",
+            "last_error",
+        }
+        assignments = []
+        values = []
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"unsupported queue field: {key}")
+            assignments.append(f"{key}=%s")
+            values.append(value)
+        assignments.append("updated_at=NOW()")
+        with self.connect() as conn:
+            with conn.transaction():
+                conn.execute(
+                    f"""
+                    UPDATE experiment_suite_queue
+                    SET {", ".join(assignments)}
+                    WHERE suite_name=%s AND method=%s AND mode=%s
+                    """,
+                    (*values, suite_name, method, mode),
+                )
+
+    def heartbeat(self, suite_name: str, method: str, mode: str, pid: int | None = None) -> None:
+        extra = ", pid=%s" if pid is not None else ""
+        params: tuple[Any, ...]
+        if pid is not None:
+            params = (int(pid), suite_name, method, mode)
+        else:
+            params = (suite_name, method, mode)
+        with self.connect() as conn:
+            with conn.transaction():
+                conn.execute(
+                    f"""
+                    UPDATE experiment_suite_queue
+                    SET heartbeat_at=NOW(), updated_at=NOW(){extra}
+                    WHERE suite_name=%s AND method=%s AND mode=%s AND status='running'
+                    """,
+                    params,
+                )
+
+    def finish(
+        self,
+        suite_name: str,
+        method: str,
+        mode: str,
+        status: str,
+        return_code: int | None,
+        last_error: str,
+    ) -> None:
+        with self.connect() as conn:
+            with conn.transaction():
+                conn.execute(
+                    """
+                    UPDATE experiment_suite_queue
+                    SET status=%s,
+                        return_code=%s,
+                        ended_at=NOW(),
+                        updated_at=NOW(),
+                        heartbeat_at=NOW(),
+                        last_error=%s
+                    WHERE suite_name=%s AND method=%s AND mode=%s
+                    """,
+                    (status, return_code, last_error, suite_name, method, mode),
+                )
+
+    def rows(self, suite_name: str, mode: str | None = None) -> list[dict[str, Any]]:
+        self.init_schema()
+        if mode:
+            sql = """
+                SELECT * FROM experiment_suite_queue
+                WHERE suite_name=%s AND mode=%s
+                ORDER BY method
+            """
+            params = (suite_name, mode)
+        else:
+            sql = """
+                SELECT * FROM experiment_suite_queue
+                WHERE suite_name=%s
+                ORDER BY mode, method
+            """
+            params = (suite_name,)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def db_url_from_args(args: argparse.Namespace) -> str:
+    value = os.environ.get(args.db_url_env)
+    if not value:
+        raise RuntimeError(f"{args.db_url_env} is required for --queue-backend postgres")
+    return value
+
+
+def start_heartbeat_thread(
+    queue: PostgresQueue,
+    suite_name: str,
+    method: str,
+    mode: str,
+    heartbeat_sec: int,
+) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+
+    def loop() -> None:
+        while not stop_event.wait(max(1, int(heartbeat_sec))):
+            try:
+                queue.heartbeat(suite_name, method, mode)
+            except Exception as exc:
+                print(f"warning: heartbeat failed for {method}: {exc}", file=sys.stderr)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return stop_event, thread
+
+
+def print_postgres_status(rows: list[dict[str, Any]]) -> None:
+    headers = [
+        "method",
+        "group",
+        "status",
+        "worker_id",
+        "server",
+        "gpu",
+        "started_at",
+        "ended_at",
+        "updated_at",
+        "retries",
+        "log_path",
+        "last_error",
+    ]
+    print("\t".join(headers))
+    for row in rows:
+        values = [
+            row.get("method", ""),
+            row.get("group_name", ""),
+            row.get("status", ""),
+            row.get("worker_id") or "",
+            row.get("server_name") or "",
+            "" if row.get("gpu_id") is None else str(row.get("gpu_id")),
+            str(row.get("started_at") or ""),
+            str(row.get("ended_at") or ""),
+            str(row.get("updated_at") or ""),
+            str(row.get("retries") or 0),
+            row.get("log_path") or "",
+            (row.get("last_error") or "").replace("\n", " ")[:160],
+        ]
+        print("\t".join(values))
+
+
 def dry_run_commands(registry: dict[str, Any], args: argparse.Namespace) -> list[list[str]]:
     methods = select_methods(registry, args.only, args.skip, args.group)
     commands: list[list[str]] = []
@@ -422,6 +836,178 @@ def dry_run_commands(registry: dict[str, Any], args: argparse.Namespace) -> list
         port = int(args.master_port) + index
         commands.append(build_command(config_path, args.nproc_per_node, port, args.seed))
     return commands
+
+
+def method_by_name(registry: dict[str, Any], method_name: str) -> dict[str, Any]:
+    for method in registry["methods"]:
+        if method["name"] == method_name:
+            return method
+    raise KeyError(f"Method from queue is not in registry: {method_name}")
+
+
+def prepare_run_config(
+    method: dict[str, Any],
+    registry: dict[str, Any],
+    args: argparse.Namespace,
+    timestamp: str,
+) -> tuple[Path, list[int], int]:
+    original_config = resolve_path(method["config"])
+    if args.mode == "full":
+        crop, global_batch = validate_full_config(method, registry, args.nproc_per_node)
+        return original_config, crop, global_batch
+
+    full_crop, _ = validate_full_config(method, registry, 1)
+    run_config = make_smoke_config(original_config, method["name"], timestamp, args.lowmem_batch_size)
+    smoke_cfg = load_yaml(run_config)
+    batch = train_batch_size(smoke_cfg)
+    if batch is None:
+        raise ValueError(f"smoke config missing batch size for {method['name']}")
+    return run_config, full_crop, batch * int(args.nproc_per_node)
+
+
+def run_postgres_claimed_method(
+    queue: PostgresQueue,
+    registry: dict[str, Any],
+    row: dict[str, Any],
+    args: argparse.Namespace,
+    timestamp: str,
+) -> int:
+    method = method_by_name(registry, row["method"])
+    run_config, crop, global_batch = prepare_run_config(method, registry, args, timestamp)
+    method_index = [m["name"] for m in registry["methods"]].index(method["name"])
+    port = int(args.master_port) + method_index
+    cmd = build_command(run_config, args.nproc_per_node, port, args.seed)
+    log_dir = resolve_path(args.log_dir) / timestamp
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{method['name']}.log"
+    queue.update_running(
+        registry["suite_name"],
+        method["name"],
+        args.mode,
+        command=command_for_display(cmd),
+        log_path=str(log_path),
+        nproc_per_node=int(args.nproc_per_node),
+        crop_size=json.dumps(crop),
+        global_batch_size=int(global_batch),
+    )
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+    stop_event, thread = start_heartbeat_thread(
+        queue,
+        registry["suite_name"],
+        method["name"],
+        args.mode,
+        args.heartbeat_sec,
+    )
+
+    def first_heartbeat(pid: int) -> None:
+        queue.heartbeat(registry["suite_name"], method["name"], args.mode, pid=pid)
+
+    print(f"postgres running {method['name']} -> {log_path}")
+    try:
+        try:
+            return_code, timed_out = run_process(cmd, env, log_path, args.timeout_sec, heartbeat=first_heartbeat)
+        except Exception as exc:
+            queue.finish(registry["suite_name"], method["name"], args.mode, "failed", None, str(exc))
+            raise
+    finally:
+        stop_event.set()
+        thread.join(timeout=5)
+    status, last_error = classify_result(return_code, timed_out, args.mode, log_path)
+    queue.finish(registry["suite_name"], method["name"], args.mode, status, return_code, last_error)
+    print(f"{method['name']}: {status} return_code={return_code} log={log_path}")
+    return 0 if status in ("success", "timeout_smoke_ok") else 1
+
+
+def postgres_worker_step(
+    queue: PostgresQueue,
+    registry: dict[str, Any],
+    args: argparse.Namespace,
+    timestamp: str,
+) -> tuple[bool, int]:
+    gpu_log_dir = resolve_path(args.log_dir) / timestamp
+    gpu_log_dir.mkdir(parents=True, exist_ok=True)
+    worker_label = args.worker_id.replace("/", "_").replace(":", "_")
+    gpu_log = gpu_log_dir / f"{worker_label}_gpu_guard.log"
+    if not wait_for_gpu(args.gpu, args.min_free_mb, args.poll_sec, args.no_wait, gpu_log):
+        print(f"GPU {args.gpu} is busy; no method claimed")
+        return False, 1
+
+    stale_count = queue.mark_stale(registry["suite_name"], args.mode, args.max_stale_minutes)
+    if stale_count:
+        print(f"marked {stale_count} stale running queue item(s)")
+    row = queue.claim_one(
+        registry,
+        args.mode,
+        args.worker_id,
+        args.server_name,
+        args.gpu,
+        args.retry_failed,
+        args.max_retries,
+    )
+    if row is None:
+        print("No pending queue item available")
+        return False, 0
+    return True, run_postgres_claimed_method(queue, registry, row, args, timestamp)
+
+
+def run_postgres_suite(args: argparse.Namespace) -> int:
+    registry_path = resolve_path(args.registry)
+    registry = load_registry(registry_path)
+    methods = select_methods(registry, args.only, args.skip, args.group)
+    if not methods:
+        raise ValueError("No methods selected")
+
+    if args.mode == "dry-run":
+        commands = dry_run_commands(registry, args)
+        for method, cmd in zip(methods, commands):
+            print(f"{method['name']}: {command_for_display(cmd)}")
+        print(f"dry-run commands: {len(commands)}")
+        return 0
+
+    queue = PostgresQueue(db_url_from_args(args))
+
+    if args.init_queue:
+        queue.seed(registry, methods, args.mode, args.nproc_per_node, args.force, args.max_retries)
+        print(f"seeded queue rows for {len(methods)} method(s) in suite={registry['suite_name']} mode={args.mode}")
+
+    if args.status:
+        print_postgres_status(queue.rows(registry["suite_name"], args.mode))
+        if not args.once and not args.loop:
+            return 0
+
+    if not args.once and not args.loop:
+        if args.init_queue:
+            return 0
+        raise ValueError("Postgres backend requires --init-queue, --status, --once, or --loop")
+    if not args.worker_id:
+        raise ValueError("--worker-id is required for Postgres workers")
+    if not args.server_name:
+        raise ValueError("--server-name is required for Postgres workers")
+
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if args.once:
+        _, code = postgres_worker_step(queue, registry, args, timestamp)
+        return code
+
+    exit_code = 0
+    while True:
+        claimed, code = postgres_worker_step(queue, registry, args, timestamp)
+        exit_code = max(exit_code, code)
+        if claimed:
+            continue
+        print(f"Sleeping {args.sleep_sec}s before checking queue again")
+        time.sleep(max(1, int(args.sleep_sec)))
+    return exit_code
+
+
+def run_entry(args: argparse.Namespace) -> int:
+    if args.queue_backend == "postgres":
+        return run_postgres_suite(args)
+    return run_suite(args)
 
 
 def run_suite(args: argparse.Namespace) -> int:
@@ -537,13 +1123,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-wait", action="store_true")
     parser.add_argument("--force-lock", action="store_true")
     parser.add_argument("--seed", type=int, default=2)
+    parser.add_argument("--queue-backend", choices=("local", "postgres"), default="local")
+    parser.add_argument("--db-url-env", default="AUGSEG_SCHEDULER_DB_URL")
+    parser.add_argument("--worker-id")
+    parser.add_argument("--server-name")
+    parser.add_argument("--init-queue", action="store_true")
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--sleep-sec", type=int, default=30)
+    parser.add_argument("--heartbeat-sec", type=int, default=30)
+    parser.add_argument("--max-stale-minutes", type=int, default=60)
+    parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--max-retries", type=int, default=1)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        return run_suite(args)
+        return run_entry(args)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -6,13 +6,133 @@ The runner only orchestrates work:
 
 - selects methods from the registry
 - checks GPU memory before each method
-- creates a per-suite/per-GPU lock
+- creates a per-suite/per-GPU lock for local runs
+- optionally uses a shared Postgres queue for multi-server runs
 - calls `train_semi.py` with the selected config
 - writes per-method logs and JSONL status
 - supports resume/skip from status
 - parses the final log after each process exits
 
 In full mode it does not own artifacts. It does not disable HF, does not change `hf.path_in_repo`, does not promote `latest`, does not upload job artifacts, and does not change saver or wandb settings. Checkpoint saving and HF upload behavior remain controlled by the original config and `train_semi.py`. If you want HF upload every epoch, configure that in the experiment config/training code, not in this runner.
+
+Do not use the older Postgres scheduler for this suite if that path overrides HF settings, uploads job bundles, or promotes `latest.tar.gz`. The queue backend here is orchestration-only.
+
+## Phase 1: Local Runner
+
+The default backend is local:
+
+```bash
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend local \
+  --gpu 0 \
+  --resume
+```
+
+Local mode runs selected methods sequentially on one server. It uses local JSONL status and a local lock file.
+
+## Phase 2: Multi-Server Postgres Queue
+
+The Postgres backend uses a shared table, `experiment_suite_queue`, as a queue/status store. It does not manage checkpoints or HF artifacts.
+
+Atomic claim uses a transaction with `SELECT ... FOR UPDATE SKIP LOCKED`, followed by an `UPDATE ... RETURNING`. That prevents `supermaster` and `islab-server3` from claiming the same method. Rows with `success` or `running` are not claimed. Failed rows are retried only with `--retry-failed` and while `retries < max_retries`.
+
+Heartbeat is written while `train_semi.py` runs. If a running row has no fresh heartbeat for `--max-stale-minutes`, another worker can mark it `failed_stale`. The runner does not kill the old process; stale handling only updates queue state.
+
+### Init Queue
+
+On `supermaster`:
+
+```bash
+source ~/.secrets/augseg_scheduler.env
+
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id supermaster:gpu0 \
+  --server-name supermaster \
+  --gpu 0 \
+  --nproc-per-node 1 \
+  --min-free-mb 17000 \
+  --init-queue \
+  --status
+```
+
+`--init-queue` creates the table if needed and seeds the 12 methods. Existing `success` or `running` rows are not reset unless `--force` is explicitly provided.
+
+### Worker: RTX 5090
+
+```bash
+source ~/.secrets/augseg_scheduler.env
+
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id supermaster:gpu0 \
+  --server-name supermaster \
+  --gpu 0 \
+  --nproc-per-node 1 \
+  --min-free-mb 17000 \
+  --loop \
+  --resume
+```
+
+### Worker: RTX A6000
+
+```bash
+source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
+
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id islab-server3:gpu0 \
+  --server-name islab-server3 \
+  --gpu 0 \
+  --nproc-per-node 1 \
+  --min-free-mb 17000 \
+  --loop \
+  --resume
+```
+
+### Queue Status
+
+```bash
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --status
+```
+
+### Stop Safely
+
+Use `Ctrl-C` or terminate the runner process. The child `torchrun` receives termination through the runner process group handling. If a worker or host dies unexpectedly, the queue row remains `running` until another worker marks it `failed_stale` after `--max-stale-minutes`.
+
+### Retry Failed
+
+Failed rows are left as final states by default. To retry failed, OOM, traceback, timeout, GPU-busy, or stale rows:
+
+```bash
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id supermaster:gpu0 \
+  --server-name supermaster \
+  --gpu 0 \
+  --retry-failed \
+  --max-retries 1 \
+  --once
+```
 
 ## Methods
 

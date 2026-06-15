@@ -103,11 +103,37 @@ def test_dry_run(registry: dict) -> None:
         require("--config" in cmd, f"command missing --config: {joined}")
 
 
+def test_postgres_cli_args() -> None:
+    args = parse_args(
+        [
+            "--registry",
+            str(REGISTRY),
+            "--mode",
+            "full",
+            "--queue-backend",
+            "postgres",
+            "--db-url-env",
+            "AUGSEG_SCHEDULER_DB_URL",
+            "--worker-id",
+            "supermaster:gpu0",
+            "--server-name",
+            "supermaster",
+            "--init-queue",
+            "--status",
+        ]
+    )
+    require(args.queue_backend == "postgres", "postgres backend arg did not parse")
+    require(args.init_queue is True, "init_queue arg did not parse")
+    require(args.status is True, "status arg did not parse")
+    require(args.worker_id == "supermaster:gpu0", "worker_id arg did not parse")
+
+
 def main() -> int:
     registry = load_registry(REGISTRY)
     test_registry_shape(registry)
     test_config_matrix(registry)
     test_dry_run(registry)
+    test_postgres_cli_args()
     print("VOC662 12-method registry smoke tests passed")
     return 0
 
