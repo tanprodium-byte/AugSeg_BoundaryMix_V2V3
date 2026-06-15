@@ -170,6 +170,7 @@ def cut_mix_label_adaptive_with_mask(
     lst_confidences,
     return_target_metadata=False,
     unlabeled_probs=None,
+    labeled_boxes=None,
 ):
     assert len(lst_confidences) == len(unlabeled_image), "Ensure the confidence is properly obtained"
     assert labeled_image.shape == unlabeled_image.shape, "Ensure shape match between lb and unlb"
@@ -187,7 +188,17 @@ def cut_mix_label_adaptive_with_mask(
 
     u_rand_index = torch.randperm(unlabeled_image.size()[0])[:unlabeled_image.size()[0]]
 
-    l_bbx1, l_bby1, l_bbx2, l_bby2 = _rand_bbox(unlabeled_image.size(), lam=np.random.beta(8, 2))
+    if labeled_boxes is None:
+        l_bbx1, l_bby1, l_bbx2, l_bby2 = _rand_bbox(unlabeled_image.size(), lam=np.random.beta(8, 2))
+    else:
+        labeled_boxes = torch.as_tensor(labeled_boxes, device=unlabeled_image.device, dtype=torch.long)
+        if labeled_boxes.shape != (unlabeled_image.size(0), 4):
+            raise ValueError("labeled_boxes must have shape [B,4]")
+        labeled_boxes = labeled_boxes[u_rand_index]
+        l_bbx1 = labeled_boxes[:, 0].detach().cpu().numpy()
+        l_bby1 = labeled_boxes[:, 1].detach().cpu().numpy()
+        l_bbx2 = labeled_boxes[:, 2].detach().cpu().numpy()
+        l_bby2 = labeled_boxes[:, 3].detach().cpu().numpy()
     u_bbx1, u_bby1, u_bbx2, u_bby2 = _rand_bbox(unlabeled_image.size(), lam=np.random.beta(4, 4))
 
     for i in range(0, mix_unlabeled_image.shape[0]):

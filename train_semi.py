@@ -25,12 +25,14 @@ from augseg.utils.utils import AverageMeter, intersectionAndUnion
 from augseg.dataset.augs_ALIA import cut_mix_label_adaptive
 from augseg.utils.loss_helper import compute_unsupervised_loss_by_threshold
 from util.boundary_mix import (
+    _rand_bbox,
     boundary_mix_debug_stats,
     cut_mix_label_adaptive_with_mask,
     thresholded_boundary_mix_loss,
 )
 from util.boundary_component import compute_component_weights
 from util.boundary_compatibility import compute_js_boundary_compatibility_loss
+from util.saliency_cutmix import get_saliency_guided_boxes
 from tools.visualize_boundary_mix_debug import save_boundary_mix_debug
 from util.run_logging import (
     get_or_create_run_id,
@@ -247,6 +249,26 @@ def build_iter_log_columns():
         "v2/min_q_C",
         "v2/max_q_C",
         "v2/loss_mix_v2",
+        "saliency/enabled",
+        "saliency/mode",
+        "saliency/num_candidates",
+        "saliency/temperature",
+        "saliency/score_selected",
+        "saliency/score_candidate_mean",
+        "saliency/score_candidate_max",
+        "saliency/score_candidate_min",
+        "saliency/score_candidate_std",
+        "saliency/prob_selected",
+        "saliency/prob_max",
+        "saliency/selection_entropy",
+        "saliency/fallback_ratio",
+        "saliency/source_is_labeled_ratio",
+        "saliency/mix1_score_selected",
+        "saliency/mix1_score_candidate_mean",
+        "saliency/mix1_selection_entropy",
+        "saliency/mix2_score_selected",
+        "saliency/mix2_score_candidate_mean",
+        "saliency/mix2_selection_entropy",
         "cuda/max_memory_allocated",
         "cuda/max_memory_reserved",
     ])
@@ -529,6 +551,23 @@ def main(in_args):
     cfg["boundary_compatibility"].setdefault("detach_gate", True)
     cfg["boundary_compatibility"].setdefault("eps", 1e-6)
     cfg["boundary_compatibility"].setdefault("debug_log", False)
+
+    cfg.setdefault("saliency_cutmix", {})
+    cfg["saliency_cutmix"].setdefault("enabled", False)
+    cfg["saliency_cutmix"].setdefault("mode", "box")
+    cfg["saliency_cutmix"].setdefault("saliency_mode", "grad")
+    cfg["saliency_cutmix"].setdefault("saliency_model", "teacher")
+    cfg["saliency_cutmix"].setdefault("saliency_loss", "supervised_ce")
+    cfg["saliency_cutmix"].setdefault("detach_saliency", True)
+    cfg["saliency_cutmix"].setdefault("num_candidates", 8)
+    cfg["saliency_cutmix"].setdefault("selection", "softmax")
+    cfg["saliency_cutmix"].setdefault("temperature", 0.2)
+    cfg["saliency_cutmix"].setdefault("apply_to", "labeled_source_only")
+    cfg["saliency_cutmix"].setdefault("fallback", "random_box")
+    cfg["saliency_cutmix"].setdefault("use_saliency_for_loss_weight", False)
+    cfg["saliency_cutmix"].setdefault("use_saliency_conf_product", False)
+    cfg["saliency_cutmix"].setdefault("debug_log", False)
+    cfg["saliency_cutmix"].setdefault("eps", 1e-6)
 
     if rank == 0:
         crop_size = cfg.get("dataset", {}).get("train", {}).get("crop", {}).get("size", [])
@@ -995,6 +1034,9 @@ def train(
         and boundary_compatibility_lambda != 0.0
     )
     boundary_compatibility_debug_enabled = bool(boundary_compatibility_cfg.get("debug_log", False))
+    saliency_cutmix_cfg = cfg.get("saliency_cutmix", {})
+    saliency_cutmix_enabled = bool(saliency_cutmix_cfg.get("enabled", False))
+    saliency_cutmix_debug_enabled = bool(saliency_cutmix_cfg.get("debug_log", False))
     model.train()
     
     # data loader
@@ -1036,6 +1078,7 @@ def train(
         bcr_stats = None
         component_stats = None
         component_loss_value = float("nan")
+        saliency_stats = None
 
         i_iter = epoch * len(loader_l) + step # total iters till now
         # log schedule (đúng y hệt block W&B phía dưới)
@@ -1135,13 +1178,45 @@ def train(
                 if do_log_now:
                     label_u_before = label_u_aug.clone()                    
 
-                if boundary_mix_enabled or boundary_component_enabled or boundary_compatibility_enabled:
+                saliency_labeled_boxes = None
+                if saliency_cutmix_enabled:
+                    try:
+                        saliency_labeled_boxes, saliency_stats = get_saliency_guided_boxes(
+                            model_teacher,
+                            image_l,
+                            label_l,
+                            _rand_bbox,
+                            num_candidates=int(saliency_cutmix_cfg.get("num_candidates", 8)),
+                            temperature=float(saliency_cutmix_cfg.get("temperature", 0.2)),
+                            ignore_index=int(cfg["dataset"].get("ignore_label", 255)),
+                            eps=float(saliency_cutmix_cfg.get("eps", 1e-6)),
+                            lam_sampler=lambda: np.random.beta(8, 2),
+                        )
+                    except Exception as exc:
+                        saliency_labeled_boxes = None
+                        saliency_stats = {
+                            "saliency/fallback_ratio": 1.0,
+                            "saliency/source_is_labeled_ratio": 1.0,
+                        }
+                        if rank == 0 and saliency_cutmix_debug_enabled:
+                            logger.info(
+                                "[saliency_cutmix] fallback=random_box epoch=%d step=%d global_iter=%d error=%s"
+                                % (epoch, step, i_iter, str(exc))
+                            )
+
+                if (
+                    boundary_mix_enabled
+                    or boundary_component_enabled
+                    or boundary_compatibility_enabled
+                    or saliency_cutmix_enabled
+                ):
                     if boundary_component_enabled:
                         mixed_result = cut_mix_label_adaptive_with_mask(
                             image_u_aug, label_u_aug, logits_u_aug,
                             image_l, label_l, confidence,
                             return_target_metadata=True,
                             unlabeled_probs=teacher_probs_u_aug,
+                            labeled_boxes=saliency_labeled_boxes,
                         )
                         if boundary_compatibility_enabled:
                             (
@@ -1167,6 +1242,7 @@ def train(
                             image_u_aug, label_u_aug, logits_u_aug,
                             image_l, label_l, confidence,
                             unlabeled_probs=teacher_probs_u_aug,
+                            labeled_boxes=saliency_labeled_boxes,
                         )
                         if boundary_compatibility_enabled:
                             image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, teacher_probs_u_aug = mixed_result
@@ -1186,6 +1262,27 @@ def train(
                 if label_u_before is not None:
                     ar_area_ratio_est = (label_u_aug != label_u_before).float().mean().item()
                     del label_u_before
+
+                if rank == 0 and saliency_cutmix_enabled and saliency_cutmix_debug_enabled and saliency_stats is not None and do_log_now:
+                    logger.info(
+                        "[saliency_cutmix] epoch=%d step=%d global_iter=%d "
+                        "selected=%.6f candidate_mean=%.6f candidate_min=%.6f candidate_max=%.6f "
+                        "candidate_std=%.6f prob_selected=%.6f prob_max=%.6f entropy=%.6f fallback=%.3f"
+                        % (
+                            epoch,
+                            step,
+                            i_iter,
+                            saliency_stats.get("saliency/score_selected", float("nan")),
+                            saliency_stats.get("saliency/score_candidate_mean", float("nan")),
+                            saliency_stats.get("saliency/score_candidate_min", float("nan")),
+                            saliency_stats.get("saliency/score_candidate_max", float("nan")),
+                            saliency_stats.get("saliency/score_candidate_std", float("nan")),
+                            saliency_stats.get("saliency/prob_selected", float("nan")),
+                            saliency_stats.get("saliency/prob_max", float("nan")),
+                            saliency_stats.get("saliency/selection_entropy", float("nan")),
+                            saliency_stats.get("saliency/fallback_ratio", float("nan")),
+                        )
+                    )
 
             debug_mixed_image = None
             if (
@@ -1675,6 +1772,27 @@ def train(
                     for key, value in bcr_stats.items():
                         if key in ITER_LOG_COLUMNS:
                             log_dict[key] = value
+
+                if saliency_cutmix_enabled:
+                    log_dict.update({
+                        "saliency/enabled": 1.0,
+                        "saliency/mode": 1.0 if saliency_cutmix_cfg.get("mode", "box") == "box" else 0.0,
+                        "saliency/num_candidates": float(saliency_cutmix_cfg.get("num_candidates", 8)),
+                        "saliency/temperature": float(saliency_cutmix_cfg.get("temperature", 0.2)),
+                    })
+                    if saliency_stats is not None:
+                        for key, value in saliency_stats.items():
+                            if key in ITER_LOG_COLUMNS:
+                                log_dict[key] = value
+                        log_dict["saliency/mix1_score_selected"] = saliency_stats.get("saliency/score_selected", np.nan)
+                        log_dict["saliency/mix1_score_candidate_mean"] = saliency_stats.get("saliency/score_candidate_mean", np.nan)
+                        log_dict["saliency/mix1_selection_entropy"] = saliency_stats.get("saliency/selection_entropy", np.nan)
+                        log_dict["saliency/mix2_score_selected"] = np.nan
+                        log_dict["saliency/mix2_score_candidate_mean"] = np.nan
+                        log_dict["saliency/mix2_selection_entropy"] = np.nan
+                else:
+                    log_dict["saliency/enabled"] = 0.0
+                    log_dict["saliency/mode"] = 0.0
 
                 if torch.cuda.is_available():
                     log_dict["cuda/max_memory_allocated"] = float(torch.cuda.max_memory_allocated(local_rank))
