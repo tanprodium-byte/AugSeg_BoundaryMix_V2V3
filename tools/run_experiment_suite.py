@@ -662,6 +662,36 @@ class PostgresQueue:
         retry_statuses = tuple(sorted(RETRYABLE_STATUSES))
         with self.connect() as conn:
             with conn.transaction():
+                active = conn.execute(
+                    """
+                    SELECT method, worker_id, server_name, gpu_id, pid, heartbeat_at, log_path
+                    FROM experiment_suite_queue
+                    WHERE suite_name=%s
+                      AND mode=%s
+                      AND status='running'
+                      AND (
+                        worker_id=%s
+                        OR (server_name=%s AND gpu_id=%s)
+                      )
+                    ORDER BY started_at ASC NULLS LAST, updated_at ASC, method ASC
+                    FOR UPDATE
+                    LIMIT 1
+                    """,
+                    (registry["suite_name"], mode, worker_id, server_name, int(gpu)),
+                ).fetchone()
+                if active is not None:
+                    print(
+                        "worker already has running job "
+                        f"method={active.get('method')} "
+                        f"worker_id={active.get('worker_id')} "
+                        f"server_name={active.get('server_name')} "
+                        f"gpu_id={active.get('gpu_id')} "
+                        f"pid={active.get('pid')} "
+                        f"heartbeat_at={active.get('heartbeat_at')} "
+                        f"log_path={active.get('log_path') or ''}"
+                    )
+                    return None
+
                 row = conn.execute(
                     """
                     WITH candidate AS (
@@ -794,24 +824,36 @@ class PostgresQueue:
                     (status, return_code, last_error, suite_name, method, mode),
                 )
 
-    def rows(self, suite_name: str, mode: str | None = None) -> list[dict[str, Any]]:
+    def rows(
+        self,
+        suite_name: str,
+        mode: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
         self.init_schema()
+        clauses = ["suite_name=%s"]
+        params: list[Any] = [suite_name]
+        if mode:
+            clauses.append("mode=%s")
+            params.append(mode)
+        if status:
+            clauses.append("status=%s")
+            params.append(status)
+        where_sql = " AND ".join(clauses)
         if mode:
             sql = """
                 SELECT * FROM experiment_suite_queue
-                WHERE suite_name=%s AND mode=%s
+                WHERE {where_sql}
                 ORDER BY method
-            """
-            params = (suite_name, mode)
+            """.format(where_sql=where_sql)
         else:
             sql = """
                 SELECT * FROM experiment_suite_queue
-                WHERE suite_name=%s
+                WHERE {where_sql}
                 ORDER BY mode, method
-            """
-            params = (suite_name,)
+            """.format(where_sql=where_sql)
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+            return [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
 
     def release_claim_test(self, suite_name: str, method: str, mode: str, last_error: str) -> None:
         with self.connect() as conn:
@@ -872,9 +914,11 @@ def print_postgres_status(rows: list[dict[str, Any]]) -> None:
         "worker_id",
         "server",
         "gpu",
+        "pid",
         "started_at",
         "ended_at",
         "updated_at",
+        "heartbeat_at",
         "retries",
         "log_path",
         "last_error",
@@ -888,14 +932,28 @@ def print_postgres_status(rows: list[dict[str, Any]]) -> None:
             row.get("worker_id") or "",
             row.get("server_name") or "",
             "" if row.get("gpu_id") is None else str(row.get("gpu_id")),
+            "" if row.get("pid") is None else str(row.get("pid")),
             str(row.get("started_at") or ""),
             str(row.get("ended_at") or ""),
             str(row.get("updated_at") or ""),
+            str(row.get("heartbeat_at") or ""),
             str(row.get("retries") or 0),
             row.get("log_path") or "",
             (row.get("last_error") or "").replace("\n", " ")[:160],
         ]
         print("\t".join(values))
+    running_by_gpu: dict[tuple[str, str], int] = {}
+    for row in rows:
+        if row.get("status") != "running":
+            continue
+        gpu_id = row.get("gpu_id")
+        key = (str(row.get("server_name") or ""), "" if gpu_id is None else str(gpu_id))
+        running_by_gpu[key] = running_by_gpu.get(key, 0) + 1
+    if running_by_gpu:
+        summary = ", ".join(
+            f"{server}:gpu{gpu}={count}" for (server, gpu), count in sorted(running_by_gpu.items())
+        )
+        print(f"running_by_gpu\t{summary}")
 
 
 def check_nvidia_smi(args: argparse.Namespace) -> tuple[bool, str]:
@@ -1199,8 +1257,9 @@ def run_postgres_suite(args: argparse.Namespace) -> int:
     if args.claim_test:
         return run_claim_test(queue, registry, args)
 
-    if args.status:
-        print_postgres_status(queue.rows(registry["suite_name"], args.mode))
+    if args.status or args.status_running:
+        status_filter = "running" if args.status_running else None
+        print_postgres_status(queue.rows(registry["suite_name"], args.mode, status_filter))
         if not args.once and not args.loop:
             return 0
 
@@ -1365,6 +1424,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--server-name")
     parser.add_argument("--init-queue", action="store_true")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--status-running", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--sleep-sec", type=int, default=30)

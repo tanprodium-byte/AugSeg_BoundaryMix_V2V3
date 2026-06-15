@@ -52,7 +52,7 @@ Local mode runs selected methods sequentially on one server. It uses local JSONL
 
 The Postgres backend uses a shared table, `experiment_suite_queue`, as a queue/status store. It does not manage checkpoints or HF artifacts.
 
-Atomic claim uses a transaction with `SELECT ... FOR UPDATE SKIP LOCKED`, followed by an `UPDATE ... RETURNING`. That prevents `supermaster` and `islab-server3` from claiming the same method. Rows with `success` or `running` are not claimed. Failed rows are retried only with `--retry-failed` and while `retries < max_retries`.
+Atomic claim uses a transaction with `SELECT ... FOR UPDATE SKIP LOCKED`, followed by an `UPDATE ... RETURNING`. That prevents `supermaster` and `islab-server3` from claiming the same method. Before claiming a new method, the same transaction also checks for an active `running` row with the same `worker_id` or the same `server_name` plus `gpu_id`. If one exists, the worker prints `worker already has running job ...` and does not claim another method for that GPU. Rows with `success` or `running` are not claimed. Failed rows are retried only with `--retry-failed` and while `retries < max_retries`.
 
 Heartbeat is written while `train_semi.py` runs. If a running row has no fresh heartbeat for `--max-stale-minutes`, another worker can mark it `failed_stale`. The runner does not kill the old process; stale handling only updates queue state.
 
@@ -129,6 +129,17 @@ python tools/run_experiment_suite.py \
   --queue-backend postgres \
   --db-url-env AUGSEG_SCHEDULER_DB_URL \
   --status
+```
+
+To show only running rows, including worker, server, GPU, pid, heartbeat, and log path:
+
+```bash
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --status-running
 ```
 
 For A6000 status checks, use the same interpreter:
