@@ -54,3 +54,7 @@ runs/suite_logs/
 runs/suite_status/
 runs/locks/
 *.tar.gz
+
+# Local Codex/scheduler smoke artifacts
+.codex_smoke/
+.scheduler_runs/
