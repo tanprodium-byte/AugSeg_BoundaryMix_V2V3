@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import signal
 import subprocess
@@ -61,6 +62,7 @@ RETRYABLE_STATUSES = {
     "gpu_busy",
     "failed_stale",
 }
+EXPECTED_METHOD_COUNT = 12
 
 
 def utc_now() -> str:
@@ -173,15 +175,54 @@ def select_methods(
     return methods
 
 
-def launcher_prefix() -> list[str]:
-    if shutil.which("torchrun"):
-        return ["torchrun"]
-    return [sys.executable, "-m", "torch.distributed.run"]
+def torchrun_matches_python_env(torchrun_path: str) -> bool:
+    python_dir = Path(sys.executable).resolve().parent
+    try:
+        return Path(torchrun_path).resolve().parent == python_dir
+    except OSError:
+        return False
 
 
-def build_command(config_path: Path, nproc_per_node: int, master_port: int, seed: int) -> list[str]:
+def resolve_launcher(launcher: str) -> tuple[str, list[str], list[str]]:
+    """Return resolved launcher name, command prefix, and warnings."""
+    warnings: list[str] = []
+    torchrun_path = shutil.which("torchrun")
+    if launcher == "python-module":
+        return "python-module", [sys.executable, "-m", "torch.distributed.run"], warnings
+    if launcher == "torchrun":
+        if not torchrun_path:
+            raise RuntimeError("launcher=torchrun requested but torchrun was not found on PATH")
+        if not torchrun_matches_python_env(torchrun_path):
+            warnings.append(
+                f"torchrun is not from sys.executable env: torchrun={torchrun_path} "
+                f"sys.executable={sys.executable}"
+            )
+        return "torchrun", [torchrun_path], warnings
+    if launcher != "auto":
+        raise ValueError(f"Unsupported launcher: {launcher}")
+    if torchrun_path and torchrun_matches_python_env(torchrun_path):
+        return "torchrun", [torchrun_path], warnings
+    if torchrun_path:
+        warnings.append(
+            f"auto launcher ignored PATH torchrun from different env: torchrun={torchrun_path} "
+            f"sys.executable={sys.executable}"
+        )
+    return "python-module", [sys.executable, "-m", "torch.distributed.run"], warnings
+
+
+def build_command(
+    config_path: Path,
+    nproc_per_node: int,
+    master_port: int,
+    seed: int,
+    launcher: str,
+) -> list[str]:
+    resolved_launcher, prefix, warnings = resolve_launcher(launcher)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(f"launcher resolved: requested={launcher} actual={resolved_launcher} prefix={command_for_display(prefix)}")
     return [
-        *launcher_prefix(),
+        *prefix,
         "--standalone",
         f"--nproc_per_node={nproc_per_node}",
         f"--master_port={master_port}",
@@ -197,6 +238,12 @@ def build_command(config_path: Path, nproc_per_node: int, master_port: int, seed
 
 def command_for_display(cmd: list[str]) -> str:
     return " ".join(cmd)
+
+
+def launcher_from_command(cmd: list[str]) -> str:
+    if len(cmd) >= 3 and cmd[0] == sys.executable and cmd[1:3] == ["-m", "torch.distributed.run"]:
+        return "python-module"
+    return "torchrun"
 
 
 def make_smoke_config(src: Path, method_name: str, timestamp: str, lowmem_batch_size: int | None) -> Path:
@@ -435,6 +482,8 @@ def base_status_record(
         "global_batch_size": int(global_batch),
         "crop_size": crop,
         "command": command_for_display(cmd),
+        "launcher": args.launcher,
+        "resolved_launcher": launcher_from_command(cmd),
         "start_time": "",
         "end_time": "",
         "duration_sec": 0.0,
@@ -764,6 +813,28 @@ class PostgresQueue:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
+    def release_claim_test(self, suite_name: str, method: str, mode: str, last_error: str) -> None:
+        with self.connect() as conn:
+            with conn.transaction():
+                conn.execute(
+                    """
+                    UPDATE experiment_suite_queue
+                    SET status='pending',
+                        worker_id=NULL,
+                        server_name=NULL,
+                        gpu_id=NULL,
+                        pid=NULL,
+                        return_code=NULL,
+                        started_at=NULL,
+                        ended_at=NULL,
+                        heartbeat_at=NULL,
+                        updated_at=NOW(),
+                        last_error=%s
+                    WHERE suite_name=%s AND method=%s AND mode=%s AND status='running'
+                    """,
+                    (last_error, suite_name, method, mode),
+                )
+
 
 def db_url_from_args(args: argparse.Namespace) -> str:
     value = os.environ.get(args.db_url_env)
@@ -827,6 +898,157 @@ def print_postgres_status(rows: list[dict[str, Any]]) -> None:
         print("\t".join(values))
 
 
+def check_nvidia_smi(args: argparse.Namespace) -> tuple[bool, str]:
+    if not shutil.which("nvidia-smi"):
+        return False, "nvidia-smi not found"
+    try:
+        snap = gpu_snapshot(args.gpu)
+    except Exception as exc:
+        return False, str(exc)
+    if snap["free_mb"] < int(args.min_free_mb):
+        return (
+            False,
+            f"GPU {args.gpu} free_mb={snap['free_mb']} below min_free_mb={args.min_free_mb}; "
+            f"processes={snap['processes']}",
+        )
+    return True, (
+        f"GPU {args.gpu} free_mb={snap['free_mb']} used_mb={snap['used_mb']} "
+        f"total_mb={snap['total_mb']} util={snap['utilization_gpu']}%"
+    )
+
+
+def check_torch() -> tuple[bool, str]:
+    try:
+        import torch
+    except Exception as exc:
+        return False, f"import torch failed: {exc}"
+    try:
+        cuda_available = bool(torch.cuda.is_available())
+        device_count = int(torch.cuda.device_count())
+    except Exception as exc:
+        return False, f"torch cuda query failed: {exc}"
+    if not cuda_available or device_count < 1:
+        return False, (
+            f"torch={torch.__version__} cuda_available={cuda_available} device_count={device_count}"
+        )
+    return True, f"torch={torch.__version__} cuda_available={cuda_available} device_count={device_count}"
+
+
+def preflight(args: argparse.Namespace) -> int:
+    failures: list[str] = []
+
+    def report(name: str, ok: bool, detail: str) -> None:
+        status = "PASS" if ok else "FAIL"
+        print(f"[{status}] {name}: {detail}")
+        if not ok:
+            failures.append(f"{name}: {detail}")
+
+    registry_path = resolve_path(args.registry)
+    try:
+        registry = load_registry(registry_path)
+        methods = select_methods(registry, args.only, args.skip, args.group)
+        report("registry", True, f"{registry_path} selected_methods={len(methods)}")
+        report(
+            "method-count",
+            len(registry["methods"]) == EXPECTED_METHOD_COUNT,
+            f"registry methods={len(registry['methods'])} expected={EXPECTED_METHOD_COUNT}",
+        )
+    except Exception as exc:
+        report("registry", False, str(exc))
+        return 1
+
+    for method in methods:
+        config_path = resolve_path(method["config"])
+        report(f"config:{method['name']}", config_path.is_file(), str(config_path))
+        if args.mode == "full":
+            try:
+                crop, global_batch = validate_full_config(method, registry, args.nproc_per_node)
+                report(
+                    f"full-config:{method['name']}",
+                    True,
+                    f"crop={crop} global_batch={global_batch}",
+                )
+            except Exception as exc:
+                report(f"full-config:{method['name']}", False, str(exc))
+
+    report("sys.executable", True, sys.executable)
+    report("python", True, platform.python_version())
+    torch_ok, torch_detail = check_torch()
+    report("torch", torch_ok, torch_detail)
+    smi_ok, smi_detail = check_nvidia_smi(args)
+    report("nvidia-smi", smi_ok, smi_detail)
+
+    try:
+        resolved, prefix, warnings = resolve_launcher(args.launcher)
+        command = [
+            *prefix,
+            "--standalone",
+            f"--nproc_per_node={args.nproc_per_node}",
+            f"--master_port={args.master_port}",
+            "train_semi.py",
+            "--config",
+            str(resolve_path(methods[0]["config"])),
+            "--seed",
+            str(args.seed),
+            "--port",
+            str(args.master_port),
+        ]
+        detail = f"requested={args.launcher} actual={resolved} command={command_for_display(command)}"
+        if warnings:
+            detail += f" warnings={' | '.join(warnings)}"
+        report("launcher", True, detail)
+    except Exception as exc:
+        report("launcher", False, str(exc))
+
+    if args.queue_backend == "postgres":
+        try:
+            queue = PostgresQueue(db_url_from_args(args))
+            rows = queue.rows(registry["suite_name"], args.mode)
+            counts: dict[str, int] = {}
+            for row in rows:
+                counts[str(row.get("status", ""))] = counts.get(str(row.get("status", "")), 0) + 1
+            report("postgres", True, f"connected rows={len(rows)} status_counts={counts}")
+        except Exception as exc:
+            report("postgres", False, str(exc))
+
+    if failures:
+        print("PRECHECK FAIL")
+        return 1
+    print("PRECHECK PASS")
+    return 0
+
+
+def run_claim_test(queue: PostgresQueue, registry: dict[str, Any], args: argparse.Namespace) -> int:
+    if args.mode == "full":
+        raise ValueError("--claim-test is only allowed with --mode smoke or --mode dry-run")
+    if not args.worker_id:
+        raise ValueError("--worker-id is required for --claim-test")
+    if not args.server_name:
+        raise ValueError("--server-name is required for --claim-test")
+    row = queue.claim_one(
+        registry,
+        args.mode,
+        args.worker_id,
+        args.server_name,
+        args.gpu,
+        args.retry_failed,
+        args.max_retries,
+    )
+    if row is None:
+        print(f"claim-test: no pending queue row for suite={registry['suite_name']} mode={args.mode}")
+        return 1
+    method = str(row["method"])
+    queue.heartbeat(registry["suite_name"], method, args.mode, pid=os.getpid())
+    queue.release_claim_test(
+        registry["suite_name"],
+        method,
+        args.mode,
+        f"claim-test released by {args.worker_id} at {utc_now()}",
+    )
+    print(f"claim-test: claimed and released method={method} mode={args.mode} worker_id={args.worker_id}")
+    return 0
+
+
 def dry_run_commands(registry: dict[str, Any], args: argparse.Namespace) -> list[list[str]]:
     methods = select_methods(registry, args.only, args.skip, args.group)
     commands: list[list[str]] = []
@@ -834,7 +1056,7 @@ def dry_run_commands(registry: dict[str, Any], args: argparse.Namespace) -> list
         validate_full_config(method, registry, args.nproc_per_node)
         config_path = resolve_path(method["config"])
         port = int(args.master_port) + index
-        commands.append(build_command(config_path, args.nproc_per_node, port, args.seed))
+        commands.append(build_command(config_path, args.nproc_per_node, port, args.seed, args.launcher))
     return commands
 
 
@@ -876,7 +1098,7 @@ def run_postgres_claimed_method(
     run_config, crop, global_batch = prepare_run_config(method, registry, args, timestamp)
     method_index = [m["name"] for m in registry["methods"]].index(method["name"])
     port = int(args.master_port) + method_index
-    cmd = build_command(run_config, args.nproc_per_node, port, args.seed)
+    cmd = build_command(run_config, args.nproc_per_node, port, args.seed, args.launcher)
     log_dir = resolve_path(args.log_dir) / timestamp
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{method['name']}.log"
@@ -974,6 +1196,9 @@ def run_postgres_suite(args: argparse.Namespace) -> int:
         queue.seed(registry, methods, args.mode, args.nproc_per_node, args.force, args.max_retries)
         print(f"seeded queue rows for {len(methods)} method(s) in suite={registry['suite_name']} mode={args.mode}")
 
+    if args.claim_test:
+        return run_claim_test(queue, registry, args)
+
     if args.status:
         print_postgres_status(queue.rows(registry["suite_name"], args.mode))
         if not args.once and not args.loop:
@@ -1005,8 +1230,12 @@ def run_postgres_suite(args: argparse.Namespace) -> int:
 
 
 def run_entry(args: argparse.Namespace) -> int:
+    if args.preflight:
+        return preflight(args)
     if args.queue_backend == "postgres":
         return run_postgres_suite(args)
+    if args.claim_test:
+        raise ValueError("--claim-test requires --queue-backend postgres")
     return run_suite(args)
 
 
@@ -1039,7 +1268,13 @@ def run_suite(args: argparse.Namespace) -> int:
             if args.resume and not args.force and latest.get(method["name"], {}).get("status") == "success":
                 log_path = log_dir / f"{method['name']}.log"
                 crop, global_batch = validate_full_config(method, registry, args.nproc_per_node)
-                cmd = build_command(resolve_path(method["config"]), args.nproc_per_node, args.master_port + index, args.seed)
+                cmd = build_command(
+                    resolve_path(method["config"]),
+                    args.nproc_per_node,
+                    args.master_port + index,
+                    args.seed,
+                    args.launcher,
+                )
                 record = base_status_record(registry, method, args, crop, global_batch, cmd, log_path, args.mode)
                 record.update({"status": "skipped_success", "start_time": utc_now(), "end_time": utc_now()})
                 append_status(status_path, record)
@@ -1061,7 +1296,7 @@ def run_suite(args: argparse.Namespace) -> int:
                 global_batch = batch * int(args.nproc_per_node)
 
             port = int(args.master_port) + index
-            cmd = build_command(run_config, args.nproc_per_node, port, args.seed)
+            cmd = build_command(run_config, args.nproc_per_node, port, args.seed, args.launcher)
             log_path = log_dir / f"{method['name']}.log"
             record = base_status_record(registry, method, args, crop, global_batch, cmd, log_path, args.mode)
 
@@ -1109,6 +1344,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--nproc-per-node", type=int, default=1)
     parser.add_argument("--master-port", type=int, default=29531)
     parser.add_argument("--mode", choices=("full", "smoke", "dry-run"), default="dry-run")
+    parser.add_argument("--launcher", choices=("auto", "torchrun", "python-module"), default="auto")
     parser.add_argument("--only")
     parser.add_argument("--skip")
     parser.add_argument("--group")
@@ -1136,6 +1372,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-stale-minutes", type=int, default=60)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--max-retries", type=int, default=1)
+    parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--claim-test", action="store_true")
     return parser.parse_args(argv)
 
 

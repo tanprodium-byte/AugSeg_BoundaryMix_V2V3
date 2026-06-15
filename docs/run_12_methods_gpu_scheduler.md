@@ -17,6 +17,22 @@ In full mode it does not own artifacts. It does not disable HF, does not change 
 
 Do not use the older Postgres scheduler for this suite if that path overrides HF settings, uploads job bundles, or promotes `latest.tar.gz`. The queue backend here is orchestration-only.
 
+## Python And Launcher
+
+Use the Python interpreter from the intended training environment. On the A6000 server, use:
+
+```bash
+/home/islabworker3/tantv/envs/augseg-bm/bin/python
+```
+
+The safest launcher is `--launcher python-module`, which runs:
+
+```bash
+sys.executable -m torch.distributed.run --standalone ...
+```
+
+This avoids accidentally using `torchrun` from the base shell. `--launcher auto` is the default; it uses `torchrun` only when `torchrun` is from the same environment as `sys.executable`, otherwise it falls back to `sys.executable -m torch.distributed.run`. `--launcher torchrun` is available for explicit torchrun use and prints a warning if PATH points outside the active Python environment.
+
 ## Phase 1: Local Runner
 
 The default backend is local:
@@ -57,6 +73,7 @@ python tools/run_experiment_suite.py \
   --gpu 0 \
   --nproc-per-node 1 \
   --min-free-mb 17000 \
+  --launcher python-module \
   --init-queue \
   --status
 ```
@@ -78,6 +95,7 @@ python tools/run_experiment_suite.py \
   --gpu 0 \
   --nproc-per-node 1 \
   --min-free-mb 17000 \
+  --launcher python-module \
   --loop \
   --resume
 ```
@@ -87,7 +105,7 @@ python tools/run_experiment_suite.py \
 ```bash
 source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
 
-python tools/run_experiment_suite.py \
+/home/islabworker3/tantv/envs/augseg-bm/bin/python tools/run_experiment_suite.py \
   --registry configs/experiment_registry_voc662_12_methods.yaml \
   --mode full \
   --queue-backend postgres \
@@ -97,6 +115,7 @@ python tools/run_experiment_suite.py \
   --gpu 0 \
   --nproc-per-node 1 \
   --min-free-mb 17000 \
+  --launcher python-module \
   --loop \
   --resume
 ```
@@ -110,6 +129,79 @@ python tools/run_experiment_suite.py \
   --queue-backend postgres \
   --db-url-env AUGSEG_SCHEDULER_DB_URL \
   --status
+```
+
+For A6000 status checks, use the same interpreter:
+
+```bash
+source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
+
+/home/islabworker3/tantv/envs/augseg-bm/bin/python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --status
+```
+
+## Preflight
+
+Preflight does not run training and does not claim queue rows unless `--claim-test` is also used. It loads the registry, validates 12 methods and full-mode crop/global batch, prints Python/torch/CUDA details, checks `nvidia-smi`, checks GPU free memory, checks Postgres status when requested, and prints the resolved launcher command.
+
+On `supermaster`:
+
+```bash
+source ~/.secrets/augseg_scheduler.env
+
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id supermaster:gpu0 \
+  --server-name supermaster \
+  --gpu 0 \
+  --nproc-per-node 1 \
+  --min-free-mb 17000 \
+  --launcher python-module \
+  --preflight
+```
+
+On the A6000 server:
+
+```bash
+source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
+
+/home/islabworker3/tantv/envs/augseg-bm/bin/python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id islab-server3:gpu0 \
+  --server-name islab-server3 \
+  --gpu 0 \
+  --nproc-per-node 1 \
+  --min-free-mb 17000 \
+  --launcher python-module \
+  --preflight
+```
+
+## Claim Test
+
+`--claim-test` is only allowed with `--mode smoke` or `--mode dry-run`; it is rejected for `full`. It atomically claims one Postgres row, writes heartbeat metadata, then releases that row back to `pending`. It does not launch training.
+
+```bash
+/home/islabworker3/tantv/envs/augseg-bm/bin/python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode smoke \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id islab-server3:gpu0 \
+  --server-name islab-server3 \
+  --gpu 0 \
+  --launcher python-module \
+  --init-queue \
+  --claim-test
 ```
 
 ### Stop Safely
@@ -187,15 +279,38 @@ python tools/run_experiment_suite.py \
   --only s1_saliency_box_cutmix,c1_csl_pseudo_selection \
   --timeout-sec 180 \
   --lowmem-batch-size 2 \
-  --min-free-mb 8000
+  --min-free-mb 8000 \
+  --launcher python-module
 ```
 
 Smoke mode is only for runtime-path checking, not research results.
 
+To test one real launcher path through Postgres without starting full training, run smoke once with a short timeout only when GPU 0 is free:
+
+```bash
+source /home/islabworker3/tantv/.secrets/augseg_scheduler.env
+
+/home/islabworker3/tantv/envs/augseg-bm/bin/python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode smoke \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id islab-server3:gpu0 \
+  --server-name islab-server3 \
+  --gpu 0 \
+  --nproc-per-node 1 \
+  --min-free-mb 17000 \
+  --lowmem-batch-size 2 \
+  --timeout-sec 180 \
+  --launcher python-module \
+  --once \
+  --resume
+```
+
 ## Full Run
 
 ```bash
-scripts/run_voc662_12_methods.sh --resume
+PYTHON=/home/islabworker3/tantv/envs/augseg-bm/bin/python scripts/run_voc662_12_methods.sh --resume --launcher python-module
 ```
 
 Or explicitly:
@@ -206,7 +321,8 @@ python tools/run_experiment_suite.py \
   --gpu 0 \
   --mode full \
   --resume \
-  --min-free-mb 12000
+  --min-free-mb 12000 \
+  --launcher python-module
 ```
 
 Do not run the full suite while developing unless you intend to start real training.

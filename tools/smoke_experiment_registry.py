@@ -93,6 +93,8 @@ def test_dry_run(registry: dict) -> None:
             "dry-run",
             "--nproc-per-node",
             "1",
+            "--launcher",
+            "python-module",
         ]
     )
     commands = dry_run_commands(registry, args)
@@ -101,6 +103,8 @@ def test_dry_run(registry: dict) -> None:
         joined = " ".join(cmd)
         require("train_semi.py" in cmd, f"command missing train_semi.py: {joined}")
         require("--config" in cmd, f"command missing --config: {joined}")
+        require(cmd[0] == sys.executable, f"python-module launcher must use sys.executable: {joined}")
+        require(cmd[1:4] == ["-m", "torch.distributed.run", "--standalone"], f"unexpected launcher: {joined}")
 
 
 def test_postgres_cli_args() -> None:
@@ -118,6 +122,8 @@ def test_postgres_cli_args() -> None:
             "supermaster:gpu0",
             "--server-name",
             "supermaster",
+            "--launcher",
+            "python-module",
             "--init-queue",
             "--status",
         ]
@@ -126,6 +132,7 @@ def test_postgres_cli_args() -> None:
     require(args.init_queue is True, "init_queue arg did not parse")
     require(args.status is True, "status arg did not parse")
     require(args.worker_id == "supermaster:gpu0", "worker_id arg did not parse")
+    require(args.launcher == "python-module", "launcher arg did not parse")
 
 
 def main() -> int:

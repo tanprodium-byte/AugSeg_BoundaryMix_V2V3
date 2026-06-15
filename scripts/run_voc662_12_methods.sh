@@ -6,8 +6,9 @@ REGISTRY="${REGISTRY:-configs/experiment_registry_voc662_12_methods.yaml}"
 GPU="${GPU:-0}"
 MODE="${MODE:-full}"
 MIN_FREE_MB="${MIN_FREE_MB:-12000}"
+PYTHON="${PYTHON:-python}"
 
-python tools/run_experiment_suite.py \
+"$PYTHON" tools/run_experiment_suite.py \
   --registry "$REGISTRY" \
   --gpu "$GPU" \
   --mode "$MODE" \
