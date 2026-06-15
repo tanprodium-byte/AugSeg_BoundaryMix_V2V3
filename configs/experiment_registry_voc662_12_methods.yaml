@@ -1,0 +1,46 @@
+suite_name: voc662_12_methods
+dataset: pascal_voc
+n_sup: 662
+crop_size: [321, 321]
+global_batch_size: 8
+default_gpu: 0
+default_nproc_per_node: 1
+default_master_port: 29531
+
+methods:
+  - name: v23_d2_no_qc_gate
+    group: boundarymix
+    config: exps/boundary_mix_v2_v3/voc_semi662/v23_d2_no_qc_gate/config.yaml
+  - name: v23_d2_soft_qc_gate_a05
+    group: boundarymix
+    config: exps/boundary_mix_v2_v3/voc_semi662/v23_d2_soft_qc_gate_a05/config.yaml
+  - name: v23_d2_soft_same_target
+    group: boundarymix
+    config: exps/boundary_mix_v2_v3/voc_semi662/v23_d2_soft_same_target/config.yaml
+  - name: v3_d2_affinity_bce
+    group: boundarymix
+    config: exps/boundary_mix_v2_v3/voc_semi662/v3_d2_affinity_bce/config.yaml
+  - name: v3_d2_teacher_feature_gate
+    group: boundarymix
+    config: exps/boundary_mix_v2_v3/voc_semi662/v3_d2_teacher_feature_gate/config.yaml
+  - name: v3_d2_teacher_relation_consistency
+    group: boundarymix
+    config: exps/boundary_mix_v2_v3/voc_semi662/v3_d2_teacher_relation_consistency/config.yaml
+  - name: s1_saliency_box_cutmix
+    group: saliency
+    config: exps/boundary_mix_v2_v3/voc_semi662/s1_saliency_box_cutmix/config.yaml
+  - name: s2_saliency_component_box_cutmix
+    group: saliency
+    config: exps/boundary_mix_v2_v3/voc_semi662/s2_saliency_component_box_cutmix/config.yaml
+  - name: s3_saliency_component_box_plus_v3_d2
+    group: saliency_v3
+    config: exps/boundary_mix_v2_v3/voc_semi662/s3_saliency_component_box_plus_v3_d2/config.yaml
+  - name: c1_csl_pseudo_selection
+    group: csl
+    config: exps/boundary_mix_v2_v3/voc_semi662/c1_csl_pseudo_selection/config.yaml
+  - name: c2_csl_random_reliable_masking
+    group: csl
+    config: exps/boundary_mix_v2_v3/voc_semi662/c2_csl_random_reliable_masking/config.yaml
+  - name: c3_csl_guided_cutmix_plus_v3_d2
+    group: csl_v3
+    config: exps/boundary_mix_v2_v3/voc_semi662/c3_csl_guided_cutmix_plus_v3_d2/config.yaml

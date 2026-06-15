@@ -48,3 +48,9 @@ exp_boundary_debug_vis/
 exps/debug_boundary_mix_vis/pascal_smoke/
 exp_smoke_checkpoint_hf/
 exp_boundary_mix_v1/
+exp_boundary_mix_v2_v3/
+tmp/
+runs/suite_logs/
+runs/suite_status/
+runs/locks/
+*.tar.gz
