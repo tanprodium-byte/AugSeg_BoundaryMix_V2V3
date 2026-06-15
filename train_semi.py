@@ -32,6 +32,8 @@ from util.boundary_mix import (
 )
 from util.boundary_component import compute_component_weights
 from util.boundary_compatibility import compute_js_boundary_compatibility_loss
+from util.csl_cutmix import get_csl_guided_boxes
+from util.csl_reliability import apply_csl_random_reliable_mask, compute_csl_reliability
 from util.saliency_cutmix import get_saliency_component_guided_boxes, get_saliency_guided_boxes
 from tools.visualize_boundary_mix_debug import save_boundary_mix_debug
 from util.run_logging import (
@@ -277,6 +279,35 @@ def build_iter_log_columns():
         "saliency/mix2_score_selected",
         "saliency/mix2_score_candidate_mean",
         "saliency/mix2_selection_entropy",
+        "csl/enabled",
+        "csl/mode",
+        "csl/use_csl_for_ce_weight",
+        "csl/use_csl_for_cutmix",
+        "csl/random_mask_reliable",
+        "csl/mean_reliability",
+        "csl/reliability_std",
+        "csl/reliability_min",
+        "csl/reliability_max",
+        "csl/confidence_mean",
+        "csl/entropy_mean",
+        "csl/margin_mean",
+        "csl/mask_prob",
+        "csl/masked_ratio",
+        "csl/raw_reliability_mean",
+        "csl/effective_weight_mean",
+        "csl_ce/weight_mean",
+        "csl_ce/weight_sum",
+        "csl_cutmix/enabled",
+        "csl_cutmix/score_selected",
+        "csl_cutmix/score_candidate_mean",
+        "csl_cutmix/score_candidate_max",
+        "csl_cutmix/score_candidate_min",
+        "csl_cutmix/score_candidate_std",
+        "csl_cutmix/prob_selected",
+        "csl_cutmix/prob_max",
+        "csl_cutmix/selection_entropy",
+        "csl_cutmix/target_reliability_selected",
+        "csl_cutmix/fallback_ratio",
         "cuda/max_memory_allocated",
         "cuda/max_memory_reserved",
     ])
@@ -584,6 +615,32 @@ def main(in_args):
     cfg["saliency_cutmix"].setdefault("use_saliency_conf_product", False)
     cfg["saliency_cutmix"].setdefault("debug_log", False)
     cfg["saliency_cutmix"].setdefault("eps", 1e-6)
+
+    cfg.setdefault("csl", {})
+    cfg["csl"].setdefault("enabled", False)
+    cfg["csl"].setdefault("mode", "disabled")
+    cfg["csl"].setdefault("reliability_mode", "entropy_margin")
+    cfg["csl"].setdefault("output", "soft_weight")
+    cfg["csl"].setdefault("detach_reliability", True)
+    cfg["csl"].setdefault("use_csl_for_ce_weight", False)
+    cfg["csl"].setdefault("use_csl_for_cutmix", False)
+    cfg["csl"].setdefault("random_mask_reliable", False)
+    cfg["csl"].setdefault("mask_prob", 0.3)
+    cfg["csl"].setdefault("mask_labeled_pixels", False)
+    cfg["csl"].setdefault("debug_log", False)
+    cfg["csl"].setdefault("eps", 1e-6)
+
+    cfg.setdefault("csl_cutmix", {})
+    cfg["csl_cutmix"].setdefault("enabled", False)
+    cfg["csl_cutmix"].setdefault("mode", "box")
+    cfg["csl_cutmix"].setdefault("target_policy", "low_reliability")
+    cfg["csl_cutmix"].setdefault("source_policy", "labeled_source")
+    cfg["csl_cutmix"].setdefault("num_candidates", 8)
+    cfg["csl_cutmix"].setdefault("selection", "softmax")
+    cfg["csl_cutmix"].setdefault("temperature", 0.2)
+    cfg["csl_cutmix"].setdefault("apply_to", "unlabeled_target_only")
+    cfg["csl_cutmix"].setdefault("fallback", "random_box")
+    cfg["csl_cutmix"].setdefault("debug_log", False)
 
     if rank == 0:
         crop_size = cfg.get("dataset", {}).get("train", {}).get("crop", {}).get("size", [])
@@ -1053,6 +1110,14 @@ def train(
     saliency_cutmix_cfg = cfg.get("saliency_cutmix", {})
     saliency_cutmix_enabled = bool(saliency_cutmix_cfg.get("enabled", False))
     saliency_cutmix_debug_enabled = bool(saliency_cutmix_cfg.get("debug_log", False))
+    csl_cfg = cfg.get("csl", {})
+    csl_enabled = bool(csl_cfg.get("enabled", False))
+    csl_use_ce_weight = csl_enabled and bool(csl_cfg.get("use_csl_for_ce_weight", False))
+    csl_use_cutmix = csl_enabled and bool(csl_cfg.get("use_csl_for_cutmix", False))
+    csl_debug_enabled = bool(csl_cfg.get("debug_log", False))
+    csl_cutmix_cfg = cfg.get("csl_cutmix", {})
+    csl_cutmix_enabled = csl_use_cutmix and bool(csl_cutmix_cfg.get("enabled", False))
+    csl_cutmix_debug_enabled = bool(csl_cutmix_cfg.get("debug_log", False))
     model.train()
     
     # data loader
@@ -1095,6 +1160,11 @@ def train(
         component_stats = None
         component_loss_value = float("nan")
         saliency_stats = None
+        csl_stats = None
+        csl_mask_stats = None
+        csl_cutmix_stats = None
+        csl_reliability_u = None
+        csl_weight_u = None
 
         i_iter = epoch * len(loader_l) + step # total iters till now
         # log schedule (đúng y hệt block W&B phía dưới)
@@ -1160,6 +1230,18 @@ def train(
                 pred_u = F.softmax(pred_u, dim=1)
                 if boundary_compatibility_enabled:
                     teacher_probs_u_aug = pred_u.detach().clone()
+                if csl_enabled:
+                    csl_reliability_u, csl_stats = compute_csl_reliability(
+                        pred_u,
+                        cfg=csl_cfg,
+                    )
+                    csl_weight_u = csl_reliability_u
+                    if csl_use_ce_weight and bool(csl_cfg.get("random_mask_reliable", False)):
+                        csl_weight_u, csl_mask_stats = apply_csl_random_reliable_mask(
+                            csl_reliability_u,
+                            mask_prob=float(csl_cfg.get("mask_prob", 0.3)),
+                            training=model.training,
+                        )
                 # obtain pseudos
                 logits_u_aug, label_u_aug = torch.max(pred_u, dim=1)
                 
@@ -1195,6 +1277,7 @@ def train(
                     label_u_before = label_u_aug.clone()                    
 
                 saliency_labeled_boxes = None
+                csl_target_boxes = None
                 if saliency_cutmix_enabled:
                     try:
                         saliency_mode = saliency_cutmix_cfg.get("mode", "box")
@@ -1241,12 +1324,31 @@ def train(
                                 "[saliency_cutmix] fallback=random_box epoch=%d step=%d global_iter=%d error=%s"
                                 % (epoch, step, i_iter, str(exc))
                             )
+                if csl_cutmix_enabled:
+                    try:
+                        csl_target_boxes, csl_cutmix_stats = get_csl_guided_boxes(
+                            csl_reliability_u,
+                            _rand_bbox,
+                            num_candidates=int(csl_cutmix_cfg.get("num_candidates", 8)),
+                            temperature=float(csl_cutmix_cfg.get("temperature", 0.2)),
+                            policy=csl_cutmix_cfg.get("target_policy", "low_reliability"),
+                        )
+                    except Exception as exc:
+                        csl_target_boxes = None
+                        csl_cutmix_stats = {"csl_cutmix/fallback_ratio": 1.0}
+                        if rank == 0 and csl_cutmix_debug_enabled:
+                            logger.info(
+                                "[csl_cutmix] fallback=random_box epoch=%d step=%d global_iter=%d error=%s"
+                                % (epoch, step, i_iter, str(exc))
+                            )
 
                 if (
                     boundary_mix_enabled
                     or boundary_component_enabled
                     or boundary_compatibility_enabled
                     or saliency_cutmix_enabled
+                    or csl_use_ce_weight
+                    or csl_cutmix_enabled
                 ):
                     if boundary_component_enabled:
                         mixed_result = cut_mix_label_adaptive_with_mask(
@@ -1254,9 +1356,11 @@ def train(
                             image_l, label_l, confidence,
                             return_target_metadata=True,
                             unlabeled_probs=teacher_probs_u_aug,
+                            unlabeled_weight=csl_weight_u if csl_use_ce_weight else None,
                             labeled_boxes=saliency_labeled_boxes,
+                            target_boxes=csl_target_boxes,
                         )
-                        if boundary_compatibility_enabled:
+                        if boundary_compatibility_enabled and csl_use_ce_weight:
                             (
                                 image_u_aug,
                                 label_u_aug,
@@ -1265,6 +1369,27 @@ def train(
                                 target_component_label,
                                 target_component_confidence,
                                 teacher_probs_u_aug,
+                                csl_weight_u,
+                            ) = mixed_result
+                        elif boundary_compatibility_enabled:
+                            (
+                                image_u_aug,
+                                label_u_aug,
+                                logits_u_aug,
+                                mix_source_mask,
+                                target_component_label,
+                                target_component_confidence,
+                                teacher_probs_u_aug,
+                            ) = mixed_result
+                        elif csl_use_ce_weight:
+                            (
+                                image_u_aug,
+                                label_u_aug,
+                                logits_u_aug,
+                                mix_source_mask,
+                                target_component_label,
+                                target_component_confidence,
+                                csl_weight_u,
                             ) = mixed_result
                         else:
                             (
@@ -1280,10 +1405,16 @@ def train(
                             image_u_aug, label_u_aug, logits_u_aug,
                             image_l, label_l, confidence,
                             unlabeled_probs=teacher_probs_u_aug,
+                            unlabeled_weight=csl_weight_u if csl_use_ce_weight else None,
                             labeled_boxes=saliency_labeled_boxes,
+                            target_boxes=csl_target_boxes,
                         )
-                        if boundary_compatibility_enabled:
+                        if boundary_compatibility_enabled and csl_use_ce_weight:
+                            image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, teacher_probs_u_aug, csl_weight_u = mixed_result
+                        elif boundary_compatibility_enabled:
                             image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, teacher_probs_u_aug = mixed_result
+                        elif csl_use_ce_weight:
+                            image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, csl_weight_u = mixed_result
                         else:
                             image_u_aug, label_u_aug, logits_u_aug, mix_source_mask = mixed_result
                 elif cfg["trainer"]["unsupervised"].get("use_cutmix_adaptive", False):                                    
@@ -1511,6 +1642,38 @@ def train(
                             float(weighted_loss_denominator.detach().item()),
                             per_class_count,
                             per_class_q,
+                        )
+                    )
+            elif csl_use_ce_weight and csl_weight_u is not None:
+                csl_eps = float(csl_cfg.get("eps", 1e-6))
+                csl_target = label_u_aug.detach().clone()
+                csl_valid = csl_target.ne(ignore)
+                csl_target[~csl_valid] = ignore
+                csl_weight = csl_weight_u.detach().to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
+                csl_weight = csl_weight * csl_valid.to(device=pred_u_strong.device, dtype=pred_u_strong.dtype)
+                csl_ce = F.cross_entropy(
+                    pred_u_strong,
+                    csl_target,
+                    ignore_index=ignore,
+                    reduction="none",
+                )
+                weighted_loss_denominator = csl_weight.sum().clamp_min(csl_eps)
+                unsup_loss = (csl_ce * csl_weight).sum() / weighted_loss_denominator
+                pseduo_high_ratio = (csl_weight > 0).float().mean()
+                if csl_stats is None:
+                    csl_stats = {}
+                csl_stats["csl_ce/weight_mean"] = float(csl_weight.detach().mean().item())
+                csl_stats["csl_ce/weight_sum"] = float(csl_weight.detach().sum().item())
+
+                if rank == 0 and csl_debug_enabled and (step < int(csl_cfg.get("debug_first_batches", 3)) or do_log_now):
+                    logger.info(
+                        "[csl] epoch=%d step=%d global_iter=%d weight_mean=%.6f weight_sum=%.3f"
+                        % (
+                            epoch,
+                            step,
+                            i_iter,
+                            csl_stats["csl_ce/weight_mean"],
+                            csl_stats["csl_ce/weight_sum"],
                         )
                     )
             elif boundary_mix_enabled and mix_source_mask is not None:
@@ -1845,6 +2008,38 @@ def train(
                 else:
                     log_dict["saliency/enabled"] = 0.0
                     log_dict["saliency/mode"] = 0.0
+
+                if csl_enabled:
+                    csl_mode_value = {
+                        "pseudo_selection": 1.0,
+                        "random_reliable_masking": 2.0,
+                        "guided_cutmix": 3.0,
+                    }.get(csl_cfg.get("mode", "disabled"), -1.0)
+                    log_dict.update({
+                        "csl/enabled": 1.0,
+                        "csl/mode": csl_mode_value,
+                        "csl/use_csl_for_ce_weight": float(csl_use_ce_weight),
+                        "csl/use_csl_for_cutmix": float(csl_use_cutmix),
+                        "csl/random_mask_reliable": float(bool(csl_cfg.get("random_mask_reliable", False))),
+                    })
+                    for stats_dict in (csl_stats, csl_mask_stats):
+                        if stats_dict is None:
+                            continue
+                        for key, value in stats_dict.items():
+                            if key in ITER_LOG_COLUMNS:
+                                log_dict[key] = value
+                else:
+                    log_dict["csl/enabled"] = 0.0
+                    log_dict["csl/mode"] = 0.0
+
+                if csl_cutmix_enabled:
+                    log_dict["csl_cutmix/enabled"] = 1.0
+                    if csl_cutmix_stats is not None:
+                        for key, value in csl_cutmix_stats.items():
+                            if key in ITER_LOG_COLUMNS:
+                                log_dict[key] = value
+                else:
+                    log_dict["csl_cutmix/enabled"] = 0.0
 
                 if torch.cuda.is_available():
                     log_dict["cuda/max_memory_allocated"] = float(torch.cuda.max_memory_allocated(local_rank))

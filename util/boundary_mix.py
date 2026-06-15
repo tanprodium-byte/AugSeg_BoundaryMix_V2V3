@@ -170,7 +170,9 @@ def cut_mix_label_adaptive_with_mask(
     lst_confidences,
     return_target_metadata=False,
     unlabeled_probs=None,
+    unlabeled_weight=None,
     labeled_boxes=None,
+    target_boxes=None,
 ):
     assert len(lst_confidences) == len(unlabeled_image), "Ensure the confidence is properly obtained"
     assert labeled_image.shape == unlabeled_image.shape, "Ensure shape match between lb and unlb"
@@ -178,6 +180,7 @@ def cut_mix_label_adaptive_with_mask(
     mix_unlabeled_target = unlabeled_mask.clone()
     mix_unlabeled_logits = unlabeled_logits.clone()
     mix_unlabeled_probs = unlabeled_probs.clone() if unlabeled_probs is not None else None
+    mix_unlabeled_weight = unlabeled_weight.clone() if unlabeled_weight is not None else None
     target_component_mask = unlabeled_mask.clone()
     target_component_logits = unlabeled_logits.clone()
     mix_target_component_mask = target_component_mask.clone()
@@ -216,8 +219,19 @@ def cut_mix_label_adaptive_with_mask(
             )
             if mix_unlabeled_probs is not None:
                 mix_unlabeled_probs[i, :, l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]] = 0.0
+            if mix_unlabeled_weight is not None:
+                mix_unlabeled_weight[i, l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]] = 1.0
 
             mix_source_mask[i, l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]] = 1.0
+
+    if target_boxes is not None:
+        target_boxes = torch.as_tensor(target_boxes, device=unlabeled_image.device, dtype=torch.long)
+        if target_boxes.shape != (unlabeled_image.size(0), 4):
+            raise ValueError("target_boxes must have shape [B,4]")
+        u_bbx1 = target_boxes[:, 0].detach().cpu().numpy()
+        u_bby1 = target_boxes[:, 1].detach().cpu().numpy()
+        u_bbx2 = target_boxes[:, 2].detach().cpu().numpy()
+        u_bby2 = target_boxes[:, 3].detach().cpu().numpy()
 
     for i in range(0, unlabeled_image.shape[0]):
         unlabeled_image[i, :, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
@@ -235,6 +249,10 @@ def cut_mix_label_adaptive_with_mask(
             unlabeled_probs[i, :, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
                 mix_unlabeled_probs[u_rand_index[i], :, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
             )
+        if unlabeled_weight is not None:
+            unlabeled_weight[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
+                mix_unlabeled_weight[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
+            )
 
         target_component_mask[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
             mix_target_component_mask[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
@@ -249,6 +267,17 @@ def cut_mix_label_adaptive_with_mask(
         )
 
     if return_target_metadata:
+        if unlabeled_probs is not None and unlabeled_weight is not None:
+            return (
+                unlabeled_image,
+                unlabeled_mask,
+                unlabeled_logits,
+                source_mask,
+                target_component_mask,
+                target_component_logits,
+                unlabeled_probs,
+                unlabeled_weight,
+            )
         if unlabeled_probs is not None:
             return (
                 unlabeled_image,
@@ -259,10 +288,24 @@ def cut_mix_label_adaptive_with_mask(
                 target_component_logits,
                 unlabeled_probs,
             )
+        if unlabeled_weight is not None:
+            return (
+                unlabeled_image,
+                unlabeled_mask,
+                unlabeled_logits,
+                source_mask,
+                target_component_mask,
+                target_component_logits,
+                unlabeled_weight,
+            )
         return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, target_component_mask, target_component_logits
 
+    if unlabeled_probs is not None and unlabeled_weight is not None:
+        return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, unlabeled_probs, unlabeled_weight
     if unlabeled_probs is not None:
         return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, unlabeled_probs
+    if unlabeled_weight is not None:
+        return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, unlabeled_weight
     return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask
 
 
