@@ -32,7 +32,7 @@ from util.boundary_mix import (
 )
 from util.boundary_component import compute_component_weights
 from util.boundary_compatibility import compute_js_boundary_compatibility_loss
-from util.saliency_cutmix import get_saliency_guided_boxes
+from util.saliency_cutmix import get_saliency_component_guided_boxes, get_saliency_guided_boxes
 from tools.visualize_boundary_mix_debug import save_boundary_mix_debug
 from util.run_logging import (
     get_or_create_run_id,
@@ -263,6 +263,14 @@ def build_iter_log_columns():
         "saliency/selection_entropy",
         "saliency/fallback_ratio",
         "saliency/source_is_labeled_ratio",
+        "saliency/num_components",
+        "saliency/num_valid_components",
+        "saliency/selected_component_class",
+        "saliency/selected_component_area",
+        "saliency/selected_component_score",
+        "saliency/component_score_mean",
+        "saliency/component_score_max",
+        "saliency/component_box_area",
         "saliency/mix1_score_selected",
         "saliency/mix1_score_candidate_mean",
         "saliency/mix1_selection_entropy",
@@ -564,6 +572,14 @@ def main(in_args):
     cfg["saliency_cutmix"].setdefault("temperature", 0.2)
     cfg["saliency_cutmix"].setdefault("apply_to", "labeled_source_only")
     cfg["saliency_cutmix"].setdefault("fallback", "random_box")
+    cfg["saliency_cutmix"].setdefault("component_source", "labeled_gt")
+    cfg["saliency_cutmix"].setdefault("connectivity", 8)
+    cfg["saliency_cutmix"].setdefault("foreground_only", True)
+    cfg["saliency_cutmix"].setdefault("ignore_label", cfg.get("dataset", {}).get("ignore_label", 255))
+    cfg["saliency_cutmix"].setdefault("min_component_area", 64)
+    cfg["saliency_cutmix"].setdefault("max_component_area", 20000)
+    cfg["saliency_cutmix"].setdefault("component_score", "mean_saliency_area")
+    cfg["saliency_cutmix"].setdefault("box_expand_ratio", 1.2)
     cfg["saliency_cutmix"].setdefault("use_saliency_for_loss_weight", False)
     cfg["saliency_cutmix"].setdefault("use_saliency_conf_product", False)
     cfg["saliency_cutmix"].setdefault("debug_log", False)
@@ -1181,17 +1197,39 @@ def train(
                 saliency_labeled_boxes = None
                 if saliency_cutmix_enabled:
                     try:
-                        saliency_labeled_boxes, saliency_stats = get_saliency_guided_boxes(
-                            model_teacher,
-                            image_l,
-                            label_l,
-                            _rand_bbox,
-                            num_candidates=int(saliency_cutmix_cfg.get("num_candidates", 8)),
-                            temperature=float(saliency_cutmix_cfg.get("temperature", 0.2)),
-                            ignore_index=int(cfg["dataset"].get("ignore_label", 255)),
-                            eps=float(saliency_cutmix_cfg.get("eps", 1e-6)),
-                            lam_sampler=lambda: np.random.beta(8, 2),
-                        )
+                        saliency_mode = saliency_cutmix_cfg.get("mode", "box")
+                        if saliency_mode == "box":
+                            saliency_labeled_boxes, saliency_stats = get_saliency_guided_boxes(
+                                model_teacher,
+                                image_l,
+                                label_l,
+                                _rand_bbox,
+                                num_candidates=int(saliency_cutmix_cfg.get("num_candidates", 8)),
+                                temperature=float(saliency_cutmix_cfg.get("temperature", 0.2)),
+                                ignore_index=int(saliency_cutmix_cfg.get("ignore_label", cfg["dataset"].get("ignore_label", 255))),
+                                eps=float(saliency_cutmix_cfg.get("eps", 1e-6)),
+                                lam_sampler=lambda: np.random.beta(8, 2),
+                            )
+                        elif saliency_mode == "component_box":
+                            if saliency_cutmix_cfg.get("component_source", "labeled_gt") != "labeled_gt":
+                                raise ValueError("saliency_cutmix.component_source currently supports 'labeled_gt' only")
+                            saliency_labeled_boxes, saliency_stats = get_saliency_component_guided_boxes(
+                                model_teacher,
+                                image_l,
+                                label_l,
+                                _rand_bbox,
+                                temperature=float(saliency_cutmix_cfg.get("temperature", 0.2)),
+                                ignore_index=int(saliency_cutmix_cfg.get("ignore_label", cfg["dataset"].get("ignore_label", 255))),
+                                eps=float(saliency_cutmix_cfg.get("eps", 1e-6)),
+                                lam_sampler=lambda: np.random.beta(8, 2),
+                                connectivity=int(saliency_cutmix_cfg.get("connectivity", 8)),
+                                foreground_only=bool(saliency_cutmix_cfg.get("foreground_only", True)),
+                                min_component_area=int(saliency_cutmix_cfg.get("min_component_area", 64)),
+                                max_component_area=int(saliency_cutmix_cfg.get("max_component_area", 20000)),
+                                box_expand_ratio=float(saliency_cutmix_cfg.get("box_expand_ratio", 1.2)),
+                            )
+                        else:
+                            raise ValueError("Unsupported saliency_cutmix.mode: %s" % saliency_mode)
                     except Exception as exc:
                         saliency_labeled_boxes = None
                         saliency_stats = {
@@ -1267,7 +1305,9 @@ def train(
                     logger.info(
                         "[saliency_cutmix] epoch=%d step=%d global_iter=%d "
                         "selected=%.6f candidate_mean=%.6f candidate_min=%.6f candidate_max=%.6f "
-                        "candidate_std=%.6f prob_selected=%.6f prob_max=%.6f entropy=%.6f fallback=%.3f"
+                        "candidate_std=%.6f prob_selected=%.6f prob_max=%.6f entropy=%.6f fallback=%.3f "
+                        "components=%.3f valid_components=%.3f selected_class=%.3f selected_area=%.3f "
+                        "selected_component_score=%.6f component_score_mean=%.6f component_score_max=%.6f component_box_area=%.3f"
                         % (
                             epoch,
                             step,
@@ -1281,6 +1321,14 @@ def train(
                             saliency_stats.get("saliency/prob_max", float("nan")),
                             saliency_stats.get("saliency/selection_entropy", float("nan")),
                             saliency_stats.get("saliency/fallback_ratio", float("nan")),
+                            saliency_stats.get("saliency/num_components", float("nan")),
+                            saliency_stats.get("saliency/num_valid_components", float("nan")),
+                            saliency_stats.get("saliency/selected_component_class", float("nan")),
+                            saliency_stats.get("saliency/selected_component_area", float("nan")),
+                            saliency_stats.get("saliency/selected_component_score", float("nan")),
+                            saliency_stats.get("saliency/component_score_mean", float("nan")),
+                            saliency_stats.get("saliency/component_score_max", float("nan")),
+                            saliency_stats.get("saliency/component_box_area", float("nan")),
                         )
                     )
 
@@ -1774,9 +1822,13 @@ def train(
                             log_dict[key] = value
 
                 if saliency_cutmix_enabled:
+                    saliency_mode_value = {
+                        "box": 1.0,
+                        "component_box": 2.0,
+                    }.get(saliency_cutmix_cfg.get("mode", "box"), -1.0)
                     log_dict.update({
                         "saliency/enabled": 1.0,
-                        "saliency/mode": 1.0 if saliency_cutmix_cfg.get("mode", "box") == "box" else 0.0,
+                        "saliency/mode": saliency_mode_value,
                         "saliency/num_candidates": float(saliency_cutmix_cfg.get("num_candidates", 8)),
                         "saliency/temperature": float(saliency_cutmix_cfg.get("temperature", 0.2)),
                     })
