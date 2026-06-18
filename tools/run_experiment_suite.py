@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -27,8 +28,8 @@ ERROR_PATTERNS = (
     "CUDA out of memory",
     "torch.OutOfMemoryError",
     "Traceback",
-    "NaN",
-    " nan",
+    "FloatingPointError",
+    "non-finite",
     "SignalException",
     "RuntimeError",
     "KeyboardInterrupt",
@@ -388,6 +389,29 @@ def read_log_text(log_path: Path) -> str:
         return ""
 
 
+FATAL_NAN_PATTERNS = (
+    re.compile(r"\b(Sup|Uns|Pseudo)\s*:\s*(?:nan|inf)\b", re.IGNORECASE),
+    re.compile(r"\b(?:total_)?loss\s*[:=]\s*(?:nan|inf)\b", re.IGNORECASE),
+    re.compile(r"\bL_BCR\s*=\s*(?:nan|inf)\b", re.IGNORECASE),
+    re.compile(r"\bbcr/loss_bcr\s*=\s*(?:nan|inf)\b", re.IGNORECASE),
+    re.compile(r"\b(?:nan|inf)\s+(?:loss|gradient|grad)\b", re.IGNORECASE),
+    re.compile(r"\b(?:loss|gradient|grad)\s+(?:is|became|produced)\s+(?:nan|inf|non-finite)\b", re.IGNORECASE),
+)
+
+
+def has_fatal_nan_or_inf(text: str) -> bool:
+    """Return True only for NaN/Inf that indicates a failed training signal.
+
+    Some debug statistics intentionally log NaN for empty sets, for example
+    missing same/diff BCR pairs or absent saliency components. Those lines should
+    not turn a zero-return-code full run into a failed suite method.
+    """
+    for line in text.splitlines():
+        if any(pattern.search(line) for pattern in FATAL_NAN_PATTERNS):
+            return True
+    return False
+
+
 def classify_result(return_code: int | None, timed_out: bool, mode: str, log_path: Path) -> tuple[str, str]:
     text = read_log_text(log_path)
     lower = text.lower()
@@ -403,7 +427,7 @@ def classify_result(return_code: int | None, timed_out: bool, mode: str, log_pat
             and "RuntimeError" not in text
             and "KeyboardInterrupt" not in text
         )
-        has_nan = "nan" in lower
+        has_nan = has_fatal_nan_or_inf(text)
         if mode == "smoke" and has_progress and (not matched or (timeout_signal_only and not has_nan)):
             return "timeout_smoke_ok", last_error
         return "timeout", last_error
@@ -412,8 +436,8 @@ def classify_result(return_code: int | None, timed_out: bool, mode: str, log_pat
             return "failed_oom", last_error
         if "traceback" in lower:
             return "failed_traceback", last_error
-        if "nan" in lower:
-            return "failed", last_error or "NaN/nan detected in log"
+        if has_fatal_nan_or_inf(text):
+            return "failed", last_error or "fatal NaN/Inf detected in loss log"
         return "success", ""
     if "cuda out of memory" in lower or "torch.outofmemoryerror" in lower:
         return "failed_oom", last_error
