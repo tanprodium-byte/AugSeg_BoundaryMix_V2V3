@@ -24,6 +24,7 @@ DEFAULT_REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods.yaml"
 LOCK_ROOT = ROOT / "runs/locks"
 SMOKE_CONFIG_ROOT = ROOT / "tmp/suite_smoke_configs"
 SMOKE_RUN_ROOT = ROOT / "tmp/suite_smoke_runs"
+SEGMENT_CONFIG_ROOT = ROOT / "runs/suite_temp/segment_configs"
 ERROR_PATTERNS = (
     "CUDA out of memory",
     "torch.OutOfMemoryError",
@@ -64,6 +65,7 @@ RETRYABLE_STATUSES = {
     "failed_stale",
 }
 EXPECTED_METHOD_COUNT = 12
+DEFAULT_SEGMENT_SUITE_NAME = "voc662_12_methods_segments_20_40_60_80"
 
 
 def utc_now() -> str:
@@ -104,6 +106,42 @@ def load_registry(path: Path) -> dict[str, Any]:
         if not config_path.is_file():
             raise FileNotFoundError(f"Config not found for {method['name']}: {method['config']}")
     return registry
+
+
+def effective_registry(registry: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    registry = copy.deepcopy(registry)
+    if args.suite_name:
+        registry["suite_name"] = args.suite_name
+    elif args.schedule_mode == "segments":
+        registry["suite_name"] = DEFAULT_SEGMENT_SUITE_NAME
+    return registry
+
+
+def parse_epoch_targets(value: str) -> list[int]:
+    targets = [int(x.strip()) for x in value.split(",") if x.strip()]
+    if not targets:
+        raise ValueError("--epoch-targets must contain at least one epoch")
+    if targets != sorted(set(targets)):
+        raise ValueError("--epoch-targets must be strictly increasing unique integers")
+    if any(t <= 0 for t in targets):
+        raise ValueError("--epoch-targets must be positive")
+    if len(targets) != 4:
+        raise ValueError("segment scheduler currently expects exactly four epoch targets, e.g. 20,40,60,80")
+    return targets
+
+
+def next_epoch_target(current_epoch: int, targets: list[int]) -> int | None:
+    for target in targets:
+        if int(current_epoch) < int(target):
+            return int(target)
+    return None
+
+
+def max_config_epochs(cfg: dict[str, Any]) -> int:
+    try:
+        return int(cfg["trainer"]["epochs"])
+    except Exception as exc:
+        raise ValueError("config must define trainer.epochs") from exc
 
 
 def crop_size(cfg: dict[str, Any]) -> list[int] | None:
@@ -263,6 +301,23 @@ def make_smoke_config(src: Path, method_name: str, timestamp: str, lowmem_batch_
     out_path = out_dir / f"{method_name}.yaml"
     with out_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(smoke_cfg, f, sort_keys=False)
+    return out_path
+
+
+def make_segment_config(src: Path, method_name: str, timestamp: str, target_epoch: int) -> Path:
+    cfg = load_yaml(src)
+    segment_cfg = copy.deepcopy(cfg)
+    original_epochs = max_config_epochs(segment_cfg)
+    if int(target_epoch) > original_epochs:
+        raise ValueError(
+            f"segment target_epoch={target_epoch} exceeds original trainer.epochs={original_epochs} for {method_name}"
+        )
+    segment_cfg.setdefault("trainer", {})["epochs"] = int(target_epoch)
+    out_dir = SEGMENT_CONFIG_ROOT / timestamp
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{method_name}_to_epoch_{int(target_epoch):03d}.yaml"
+    with out_path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(segment_cfg, f, sort_keys=False)
     return out_path
 
 
@@ -583,6 +638,19 @@ class PostgresQueue:
                     ON experiment_suite_queue (suite_name, mode, status, heartbeat_at)
                     """
                 )
+                for statement in (
+                    "ALTER TABLE experiment_suite_queue ADD COLUMN IF NOT EXISTS schedule_mode TEXT NOT NULL DEFAULT 'full_method'",
+                    "ALTER TABLE experiment_suite_queue ADD COLUMN IF NOT EXISTS current_epoch INTEGER NOT NULL DEFAULT 0",
+                    "ALTER TABLE experiment_suite_queue ADD COLUMN IF NOT EXISTS target_epoch INTEGER",
+                    "ALTER TABLE experiment_suite_queue ADD COLUMN IF NOT EXISTS epoch_targets TEXT",
+                ):
+                    conn.execute(statement)
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_experiment_suite_queue_segment_claim
+                    ON experiment_suite_queue (suite_name, mode, schedule_mode, status, current_epoch, method)
+                    """
+                )
 
     def seed(
         self,
@@ -592,8 +660,12 @@ class PostgresQueue:
         nproc_per_node: int,
         force: bool,
         max_retries: int,
+        schedule_mode: str = "full_method",
+        epoch_targets: list[int] | None = None,
     ) -> None:
         self.init_schema()
+        target_epoch = int(epoch_targets[0]) if schedule_mode == "segments" and epoch_targets else None
+        epoch_targets_text = ",".join(str(x) for x in epoch_targets) if epoch_targets else ""
         with self.connect() as conn:
             with conn.transaction():
                 for method in methods:
@@ -612,9 +684,11 @@ class PostgresQueue:
                             INSERT INTO experiment_suite_queue (
                               suite_name, method, group_name, config_path, mode, status,
                               nproc_per_node, crop_size, global_batch_size, retries,
-                              max_retries, updated_at
+                              max_retries, schedule_mode, current_epoch, target_epoch,
+                              epoch_targets, updated_at
                             )
-                            VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, 0, %s, NOW())
+                            VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, 0, %s,
+                                    %s, 0, %s, %s, NOW())
                             """,
                             (
                                 registry["suite_name"],
@@ -626,15 +700,20 @@ class PostgresQueue:
                                 json.dumps(crop),
                                 int(global_batch),
                                 int(max_retries),
+                                schedule_mode,
+                                target_epoch,
+                                epoch_targets_text,
                             ),
                         )
                     else:
-                        reset_sql = ", status='pending', worker_id=NULL, server_name=NULL, gpu_id=NULL, pid=NULL, return_code=NULL, started_at=NULL, ended_at=NULL, heartbeat_at=NULL, last_error=''"
+                        reset_sql = ", status='pending', worker_id=NULL, server_name=NULL, gpu_id=NULL, pid=NULL, return_code=NULL, started_at=NULL, ended_at=NULL, heartbeat_at=NULL, last_error='', current_epoch=0, target_epoch=%s"
+                        reset_params = [target_epoch] if force else []
                         conn.execute(
                             f"""
                             UPDATE experiment_suite_queue
                             SET group_name=%s, config_path=%s, nproc_per_node=%s,
                                 crop_size=%s, global_batch_size=%s, max_retries=%s,
+                                schedule_mode=%s, epoch_targets=%s,
                                 updated_at=NOW()
                                 {reset_sql if force else ""}
                             WHERE suite_name=%s AND method=%s AND mode=%s
@@ -646,6 +725,9 @@ class PostgresQueue:
                                 json.dumps(crop),
                                 int(global_batch),
                                 int(max_retries),
+                                schedule_mode,
+                                epoch_targets_text,
+                                *reset_params,
                                 registry["suite_name"],
                                 method["name"],
                                 mode,
@@ -681,9 +763,12 @@ class PostgresQueue:
         gpu: int,
         retry_failed: bool,
         max_retries: int,
+        schedule_mode: str = "full_method",
+        epoch_targets: list[int] | None = None,
     ) -> dict[str, Any] | None:
         self.init_schema()
         retry_statuses = tuple(sorted(RETRYABLE_STATUSES))
+        max_target = int(epoch_targets[-1]) if epoch_targets else None
         with self.connect() as conn:
             with conn.transaction():
                 active = conn.execute(
@@ -692,6 +777,7 @@ class PostgresQueue:
                     FROM experiment_suite_queue
                     WHERE suite_name=%s
                       AND mode=%s
+                      AND schedule_mode=%s
                       AND status='running'
                       AND (
                         worker_id=%s
@@ -701,7 +787,7 @@ class PostgresQueue:
                     FOR UPDATE
                     LIMIT 1
                     """,
-                    (registry["suite_name"], mode, worker_id, server_name, int(gpu)),
+                    (registry["suite_name"], mode, schedule_mode, worker_id, server_name, int(gpu)),
                 ).fetchone()
                 if active is not None:
                     print(
@@ -716,55 +802,125 @@ class PostgresQueue:
                     )
                     return None
 
-                row = conn.execute(
-                    """
-                    WITH candidate AS (
-                      SELECT suite_name, method, mode
-                      FROM experiment_suite_queue
-                      WHERE suite_name=%s
-                        AND mode=%s
-                        AND (
-                          status='pending'
-                          OR (
-                            %s
-                            AND status = ANY(%s)
-                            AND retries < LEAST(max_retries, %s)
-                          )
+                if schedule_mode == "segments":
+                    if not epoch_targets or max_target is None:
+                        raise ValueError("segments schedule requires epoch_targets")
+                    row = conn.execute(
+                        """
+                        WITH candidate AS (
+                          SELECT suite_name, method, mode,
+                                 current_epoch,
+                                 CASE
+                                   WHEN current_epoch < %s THEN %s
+                                   WHEN current_epoch < %s THEN %s
+                                   WHEN current_epoch < %s THEN %s
+                                   WHEN current_epoch < %s THEN %s
+                                   ELSE NULL
+                                 END AS next_target_epoch
+                          FROM experiment_suite_queue
+                          WHERE suite_name=%s
+                            AND mode=%s
+                            AND schedule_mode='segments'
+                            AND current_epoch < %s
+                            AND (
+                              status='pending'
+                              OR (
+                                %s
+                                AND status = ANY(%s)
+                                AND retries < LEAST(max_retries, %s)
+                              )
+                            )
+                          ORDER BY current_epoch ASC, method ASC
+                          FOR UPDATE SKIP LOCKED
+                          LIMIT 1
                         )
-                      ORDER BY updated_at ASC, method ASC
-                      FOR UPDATE SKIP LOCKED
-                      LIMIT 1
-                    )
-                    UPDATE experiment_suite_queue q
-                    SET status='running',
-                        worker_id=%s,
-                        server_name=%s,
-                        gpu_id=%s,
-                        pid=NULL,
-                        return_code=NULL,
-                        started_at=NOW(),
-                        ended_at=NULL,
-                        updated_at=NOW(),
-                        heartbeat_at=NOW(),
-                        last_error='',
-                        retries=q.retries + CASE WHEN q.status='pending' THEN 0 ELSE 1 END
-                    FROM candidate
-                    WHERE q.suite_name=candidate.suite_name
-                      AND q.method=candidate.method
-                      AND q.mode=candidate.mode
-                    RETURNING q.*
-                    """,
-                    (
-                        registry["suite_name"],
-                        mode,
-                        bool(retry_failed),
-                        list(retry_statuses),
-                        int(max_retries),
-                        worker_id,
-                        server_name,
-                        int(gpu),
-                    ),
-                ).fetchone()
+                        UPDATE experiment_suite_queue q
+                        SET status='running',
+                            worker_id=%s,
+                            server_name=%s,
+                            gpu_id=%s,
+                            pid=NULL,
+                            return_code=NULL,
+                            target_epoch=candidate.next_target_epoch,
+                            started_at=NOW(),
+                            ended_at=NULL,
+                            updated_at=NOW(),
+                            heartbeat_at=NOW(),
+                            last_error='',
+                            retries=q.retries + CASE WHEN q.status='pending' THEN 0 ELSE 1 END
+                        FROM candidate
+                        WHERE q.suite_name=candidate.suite_name
+                          AND q.method=candidate.method
+                          AND q.mode=candidate.mode
+                        RETURNING q.*
+                        """,
+                        (
+                            epoch_targets[0], epoch_targets[0],
+                            epoch_targets[1], epoch_targets[1],
+                            epoch_targets[2], epoch_targets[2],
+                            epoch_targets[3], epoch_targets[3],
+                            registry["suite_name"],
+                            mode,
+                            max_target,
+                            bool(retry_failed),
+                            list(retry_statuses),
+                            int(max_retries),
+                            worker_id,
+                            server_name,
+                            int(gpu),
+                        ),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        WITH candidate AS (
+                          SELECT suite_name, method, mode
+                          FROM experiment_suite_queue
+                          WHERE suite_name=%s
+                            AND mode=%s
+                            AND schedule_mode='full_method'
+                            AND (
+                              status='pending'
+                              OR (
+                                %s
+                                AND status = ANY(%s)
+                                AND retries < LEAST(max_retries, %s)
+                              )
+                            )
+                          ORDER BY updated_at ASC, method ASC
+                          FOR UPDATE SKIP LOCKED
+                          LIMIT 1
+                        )
+                        UPDATE experiment_suite_queue q
+                        SET status='running',
+                            worker_id=%s,
+                            server_name=%s,
+                            gpu_id=%s,
+                            pid=NULL,
+                            return_code=NULL,
+                            started_at=NOW(),
+                            ended_at=NULL,
+                            updated_at=NOW(),
+                            heartbeat_at=NOW(),
+                            last_error='',
+                            retries=q.retries + CASE WHEN q.status='pending' THEN 0 ELSE 1 END
+                        FROM candidate
+                        WHERE q.suite_name=candidate.suite_name
+                          AND q.method=candidate.method
+                          AND q.mode=candidate.mode
+                        RETURNING q.*
+                        """,
+                        (
+                            registry["suite_name"],
+                            mode,
+                            bool(retry_failed),
+                            list(retry_statuses),
+                            int(max_retries),
+                            worker_id,
+                            server_name,
+                            int(gpu),
+                        ),
+                    ).fetchone()
                 return dict(row) if row else None
 
     def update_running(
@@ -785,6 +941,7 @@ class PostgresQueue:
             "global_batch_size",
             "status",
             "last_error",
+            "target_epoch",
         }
         assignments = []
         values = []
@@ -848,6 +1005,65 @@ class PostgresQueue:
                     (status, return_code, last_error, suite_name, method, mode),
                 )
 
+    def finish_segment(
+        self,
+        suite_name: str,
+        method: str,
+        mode: str,
+        status: str,
+        return_code: int | None,
+        last_error: str,
+        target_epoch: int,
+        max_target_epoch: int,
+        next_target_epoch: int | None,
+    ) -> None:
+        with self.connect() as conn:
+            with conn.transaction():
+                if status == "success":
+                    final_status = "success" if int(target_epoch) >= int(max_target_epoch) else "pending"
+                    conn.execute(
+                        """
+                        UPDATE experiment_suite_queue
+                        SET status=%s,
+                            current_epoch=%s,
+                            target_epoch=%s,
+                            worker_id=NULL,
+                            server_name=NULL,
+                            gpu_id=NULL,
+                            pid=NULL,
+                            return_code=%s,
+                            ended_at=NOW(),
+                            updated_at=NOW(),
+                            heartbeat_at=NOW(),
+                            last_error=%s
+                        WHERE suite_name=%s AND method=%s AND mode=%s AND status='running'
+                        """,
+                        (
+                            final_status,
+                            int(target_epoch),
+                            next_target_epoch,
+                            return_code,
+                            last_error,
+                            suite_name,
+                            method,
+                            mode,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE experiment_suite_queue
+                        SET status=%s,
+                            return_code=%s,
+                            ended_at=NOW(),
+                            updated_at=NOW(),
+                            heartbeat_at=NOW(),
+                            last_error=%s
+                        WHERE suite_name=%s AND method=%s AND mode=%s AND status='running'
+                        """,
+                        (status, return_code, last_error, suite_name, method, mode),
+                    )
+
     def rows(
         self,
         suite_name: str,
@@ -868,13 +1084,13 @@ class PostgresQueue:
             sql = """
                 SELECT * FROM experiment_suite_queue
                 WHERE {where_sql}
-                ORDER BY method
+                ORDER BY current_epoch, method
             """.format(where_sql=where_sql)
         else:
             sql = """
                 SELECT * FROM experiment_suite_queue
                 WHERE {where_sql}
-                ORDER BY mode, method
+                ORDER BY mode, current_epoch, method
             """.format(where_sql=where_sql)
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
@@ -935,6 +1151,10 @@ def print_postgres_status(rows: list[dict[str, Any]]) -> None:
         "method",
         "group",
         "status",
+        "schedule_mode",
+        "current_epoch",
+        "target_epoch",
+        "next_target_epoch",
         "worker_id",
         "server",
         "gpu",
@@ -949,10 +1169,16 @@ def print_postgres_status(rows: list[dict[str, Any]]) -> None:
     ]
     print("\t".join(headers))
     for row in rows:
+        epoch_targets = parse_epoch_targets(row.get("epoch_targets") or "20,40,60,80") if row.get("schedule_mode") == "segments" else []
+        next_target = next_epoch_target(int(row.get("current_epoch") or 0), epoch_targets) if epoch_targets else None
         values = [
             row.get("method", ""),
             row.get("group_name", ""),
             row.get("status", ""),
+            row.get("schedule_mode", ""),
+            str(row.get("current_epoch") or 0),
+            "" if row.get("target_epoch") is None else str(row.get("target_epoch")),
+            "" if next_target is None else str(next_target),
             row.get("worker_id") or "",
             row.get("server_name") or "",
             "" if row.get("gpu_id") is None else str(row.get("gpu_id")),
@@ -1027,7 +1253,8 @@ def preflight(args: argparse.Namespace) -> int:
 
     registry_path = resolve_path(args.registry)
     try:
-        registry = load_registry(registry_path)
+        registry = effective_registry(load_registry(registry_path), args)
+        epoch_targets = parse_epoch_targets(args.epoch_targets)
         methods = select_methods(registry, args.only, args.skip, args.group)
         report("registry", True, f"{registry_path} selected_methods={len(methods)}")
         report(
@@ -1035,6 +1262,12 @@ def preflight(args: argparse.Namespace) -> int:
             len(registry["methods"]) == EXPECTED_METHOD_COUNT,
             f"registry methods={len(registry['methods'])} expected={EXPECTED_METHOD_COUNT}",
         )
+        if args.schedule_mode == "segments":
+            report(
+                "segments",
+                True,
+                f"suite={registry['suite_name']} epoch_targets={epoch_targets}",
+            )
     except Exception as exc:
         report("registry", False, str(exc))
         return 1
@@ -1115,6 +1348,8 @@ def run_claim_test(queue: PostgresQueue, registry: dict[str, Any], args: argpars
         args.gpu,
         args.retry_failed,
         args.max_retries,
+        args.schedule_mode,
+        parse_epoch_targets(args.epoch_targets) if args.schedule_mode == "segments" else None,
     )
     if row is None:
         print(f"claim-test: no pending queue row for suite={registry['suite_name']} mode={args.mode}")
@@ -1133,10 +1368,18 @@ def run_claim_test(queue: PostgresQueue, registry: dict[str, Any], args: argpars
 
 def dry_run_commands(registry: dict[str, Any], args: argparse.Namespace) -> list[list[str]]:
     methods = select_methods(registry, args.only, args.skip, args.group)
+    epoch_targets = parse_epoch_targets(args.epoch_targets)
+    timestamp = "dry_run_segments" if args.schedule_mode == "segments" else "dry_run"
     commands: list[list[str]] = []
     for index, method in enumerate(methods):
         validate_full_config(method, registry, args.nproc_per_node)
-        config_path = resolve_path(method["config"])
+        if args.schedule_mode == "segments":
+            cfg = load_yaml(resolve_path(method["config"]))
+            if epoch_targets[-1] > max_config_epochs(cfg):
+                raise ValueError(f"{method['name']} trainer.epochs is below final segment target")
+            config_path = make_segment_config(resolve_path(method["config"]), method["name"], timestamp, epoch_targets[0])
+        else:
+            config_path = resolve_path(method["config"])
         port = int(args.master_port) + index
         commands.append(build_command(config_path, args.nproc_per_node, port, args.seed, args.launcher))
     return commands
@@ -1156,9 +1399,13 @@ def prepare_run_config(
     timestamp: str,
 ) -> tuple[Path, list[int], int]:
     original_config = resolve_path(method["config"])
-    if args.mode == "full":
+    if args.mode == "full" and args.schedule_mode == "full_method":
         crop, global_batch = validate_full_config(method, registry, args.nproc_per_node)
         return original_config, crop, global_batch
+    if args.mode == "full" and args.schedule_mode == "segments":
+        crop, global_batch = validate_full_config(method, registry, args.nproc_per_node)
+        target_epoch = int(args.segment_target_epoch)
+        return make_segment_config(original_config, method["name"], timestamp, target_epoch), crop, global_batch
 
     full_crop, _ = validate_full_config(method, registry, 1)
     run_config = make_smoke_config(original_config, method["name"], timestamp, args.lowmem_batch_size)
@@ -1177,13 +1424,20 @@ def run_postgres_claimed_method(
     timestamp: str,
 ) -> int:
     method = method_by_name(registry, row["method"])
+    if args.schedule_mode == "segments":
+        args.segment_target_epoch = int(row["target_epoch"])
     run_config, crop, global_batch = prepare_run_config(method, registry, args, timestamp)
     method_index = [m["name"] for m in registry["methods"]].index(method["name"])
     port = int(args.master_port) + method_index
     cmd = build_command(run_config, args.nproc_per_node, port, args.seed, args.launcher)
     log_dir = resolve_path(args.log_dir) / timestamp
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{method['name']}.log"
+    if args.schedule_mode == "segments":
+        log_path = log_dir / (
+            f"{method['name']}_e{int(row['current_epoch']):03d}_to_e{int(row['target_epoch']):03d}.log"
+        )
+    else:
+        log_path = log_dir / f"{method['name']}.log"
     queue.update_running(
         registry["suite_name"],
         method["name"],
@@ -1193,6 +1447,7 @@ def run_postgres_claimed_method(
         nproc_per_node=int(args.nproc_per_node),
         crop_size=json.dumps(crop),
         global_batch_size=int(global_batch),
+        target_epoch=int(row["target_epoch"]) if args.schedule_mode == "segments" else None,
     )
 
     env = os.environ.copy()
@@ -1210,7 +1465,13 @@ def run_postgres_claimed_method(
     def first_heartbeat(pid: int) -> None:
         queue.heartbeat(registry["suite_name"], method["name"], args.mode, pid=pid)
 
-    print(f"postgres running {method['name']} -> {log_path}")
+    if args.schedule_mode == "segments":
+        print(
+            f"postgres running segment {method['name']} "
+            f"{int(row['current_epoch'])}->{int(row['target_epoch'])} -> {log_path}"
+        )
+    else:
+        print(f"postgres running {method['name']} -> {log_path}")
     try:
         try:
             return_code, timed_out = run_process(cmd, env, log_path, args.timeout_sec, heartbeat=first_heartbeat)
@@ -1221,8 +1482,27 @@ def run_postgres_claimed_method(
         stop_event.set()
         thread.join(timeout=5)
     status, last_error = classify_result(return_code, timed_out, args.mode, log_path)
-    queue.finish(registry["suite_name"], method["name"], args.mode, status, return_code, last_error)
-    print(f"{method['name']}: {status} return_code={return_code} log={log_path}")
+    if args.schedule_mode == "segments":
+        epoch_targets = parse_epoch_targets(args.epoch_targets)
+        target_epoch = int(row["target_epoch"])
+        queue.finish_segment(
+            registry["suite_name"],
+            method["name"],
+            args.mode,
+            status,
+            return_code,
+            last_error,
+            target_epoch,
+            epoch_targets[-1],
+            next_epoch_target(target_epoch, epoch_targets),
+        )
+        print(
+            f"{method['name']} segment {int(row['current_epoch'])}->{target_epoch}: "
+            f"{status} return_code={return_code} log={log_path}"
+        )
+    else:
+        queue.finish(registry["suite_name"], method["name"], args.mode, status, return_code, last_error)
+        print(f"{method['name']}: {status} return_code={return_code} log={log_path}")
     return 0 if status in ("success", "timeout_smoke_ok") else 1
 
 
@@ -1251,6 +1531,8 @@ def postgres_worker_step(
         args.gpu,
         args.retry_failed,
         args.max_retries,
+        args.schedule_mode,
+        parse_epoch_targets(args.epoch_targets) if args.schedule_mode == "segments" else None,
     )
     if row is None:
         print("No pending queue item available")
@@ -1260,7 +1542,8 @@ def postgres_worker_step(
 
 def run_postgres_suite(args: argparse.Namespace) -> int:
     registry_path = resolve_path(args.registry)
-    registry = load_registry(registry_path)
+    registry = effective_registry(load_registry(registry_path), args)
+    epoch_targets = parse_epoch_targets(args.epoch_targets)
     methods = select_methods(registry, args.only, args.skip, args.group)
     if not methods:
         raise ValueError("No methods selected")
@@ -1275,8 +1558,20 @@ def run_postgres_suite(args: argparse.Namespace) -> int:
     queue = PostgresQueue(db_url_from_args(args))
 
     if args.init_queue:
-        queue.seed(registry, methods, args.mode, args.nproc_per_node, args.force, args.max_retries)
-        print(f"seeded queue rows for {len(methods)} method(s) in suite={registry['suite_name']} mode={args.mode}")
+        queue.seed(
+            registry,
+            methods,
+            args.mode,
+            args.nproc_per_node,
+            args.force,
+            args.max_retries,
+            args.schedule_mode,
+            epoch_targets if args.schedule_mode == "segments" else None,
+        )
+        print(
+            f"seeded queue rows for {len(methods)} method(s) in suite={registry['suite_name']} "
+            f"mode={args.mode} schedule_mode={args.schedule_mode}"
+        )
 
     if args.claim_test:
         return run_claim_test(queue, registry, args)
@@ -1324,7 +1619,7 @@ def run_entry(args: argparse.Namespace) -> int:
 
 def run_suite(args: argparse.Namespace) -> int:
     registry_path = resolve_path(args.registry)
-    registry = load_registry(registry_path)
+    registry = effective_registry(load_registry(registry_path), args)
     suite_name = registry["suite_name"]
     methods = select_methods(registry, args.only, args.skip, args.group)
     if not methods:
@@ -1427,6 +1722,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--nproc-per-node", type=int, default=1)
     parser.add_argument("--master-port", type=int, default=29531)
     parser.add_argument("--mode", choices=("full", "smoke", "dry-run"), default="dry-run")
+    parser.add_argument("--schedule-mode", choices=("full_method", "segments"), default="full_method")
+    parser.add_argument("--epoch-targets", default="20,40,60,80")
+    parser.add_argument("--suite-name")
     parser.add_argument("--launcher", choices=("auto", "torchrun", "python-module"), default="auto")
     parser.add_argument("--only")
     parser.add_argument("--skip")

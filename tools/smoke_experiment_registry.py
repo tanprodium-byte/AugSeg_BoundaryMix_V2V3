@@ -12,6 +12,7 @@ from tools.run_experiment_suite import (  # noqa: E402
     dry_run_commands,
     load_registry,
     load_yaml,
+    parse_epoch_targets,
     parse_args,
     resolve_path,
     validate_full_config,
@@ -107,6 +108,40 @@ def test_dry_run(registry: dict) -> None:
         require(cmd[1:4] == ["-m", "torch.distributed.run", "--standalone"], f"unexpected launcher: {joined}")
 
 
+def test_segment_dry_run(registry: dict) -> None:
+    args = parse_args(
+        [
+            "--registry",
+            str(REGISTRY),
+            "--gpu",
+            "0",
+            "--mode",
+            "dry-run",
+            "--schedule-mode",
+            "segments",
+            "--epoch-targets",
+            "20,40,60,80",
+            "--suite-name",
+            "voc662_12_methods_segments_20_40_60_80",
+            "--nproc-per-node",
+            "1",
+            "--launcher",
+            "python-module",
+        ]
+    )
+    require(parse_epoch_targets(args.epoch_targets) == [20, 40, 60, 80], "epoch targets did not parse")
+    commands = dry_run_commands(registry, args)
+    require(len(commands) == 12, f"expected 12 segment dry-run commands, got {len(commands)}")
+    first = commands[0]
+    require("--config" in first, "segment command missing --config")
+    cfg_path = Path(first[first.index("--config") + 1])
+    segment_cfg = load_yaml(cfg_path)
+    original_cfg = cfg(registry["methods"][0])
+    require(segment_cfg["trainer"]["epochs"] == 20, "segment temp config must target epoch 20")
+    for key in ("hf", "saver", "wandb"):
+        require(segment_cfg.get(key) == original_cfg.get(key), f"segment temp config changed {key}")
+
+
 def test_postgres_cli_args() -> None:
     args = parse_args(
         [
@@ -133,6 +168,33 @@ def test_postgres_cli_args() -> None:
     require(args.status is True, "status arg did not parse")
     require(args.worker_id == "supermaster:gpu0", "worker_id arg did not parse")
     require(args.launcher == "python-module", "launcher arg did not parse")
+    seg_args = parse_args(
+        [
+            "--registry",
+            str(REGISTRY),
+            "--mode",
+            "full",
+            "--schedule-mode",
+            "segments",
+            "--epoch-targets",
+            "20,40,60,80",
+            "--suite-name",
+            "voc662_12_methods_segments_20_40_60_80",
+            "--queue-backend",
+            "postgres",
+            "--db-url-env",
+            "AUGSEG_SCHEDULER_DB_URL",
+            "--worker-id",
+            "islab-server3:gpu0",
+            "--server-name",
+            "islab-server3",
+            "--launcher",
+            "python-module",
+            "--init-queue",
+        ]
+    )
+    require(seg_args.schedule_mode == "segments", "segment schedule arg did not parse")
+    require(seg_args.suite_name == "voc662_12_methods_segments_20_40_60_80", "suite_name arg did not parse")
 
 
 def main() -> int:
@@ -140,6 +202,7 @@ def main() -> int:
     test_registry_shape(registry)
     test_config_matrix(registry)
     test_dry_run(registry)
+    test_segment_dry_run(registry)
     test_postgres_cli_args()
     print("VOC662 12-method registry smoke tests passed")
     return 0

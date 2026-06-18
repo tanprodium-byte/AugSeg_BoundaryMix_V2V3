@@ -17,6 +17,70 @@ In full mode it does not own artifacts. It does not disable HF, does not change 
 
 Do not use the older Postgres scheduler for this suite if that path overrides HF settings, uploads job bundles, or promotes `latest.tar.gz`. The queue backend here is orchestration-only.
 
+## Segment Scheduler: 20 -> 40 -> 60 -> 80
+
+Use the segment scheduler for the production 12-method VOC662 run. It uses a separate suite name so old full-method-run status rows are preserved:
+
+```bash
+voc662_12_methods_segments_20_40_60_80
+```
+
+Each worker is still one long-running tmux process per GPU. A worker atomically claims one segment, runs that method from its current checkpoint to the next target epoch, reports the row, and then claims another segment. The target sequence is `20,40,60,80`.
+
+The runner creates a temporary config under `runs/suite_temp/segment_configs/...` for each claimed segment. The only intended config change is `trainer.epochs=<target_epoch>`. It does not change `hf`, `saver`, `wandb`, `latest`, crop, batch size, or strong augmentation. Resume still depends on the original experiment `save_path` and `train_semi.py` checkpoint auto-resume.
+
+Dry-run segment commands:
+
+```bash
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode dry-run \
+  --schedule-mode segments \
+  --epoch-targets 20,40,60,80 \
+  --suite-name voc662_12_methods_segments_20_40_60_80 \
+  --launcher python-module
+```
+
+Initialize the segment queue:
+
+```bash
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --schedule-mode segments \
+  --epoch-targets 20,40,60,80 \
+  --suite-name voc662_12_methods_segments_20_40_60_80 \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --init-queue \
+  --status
+```
+
+Run a segment worker:
+
+```bash
+python tools/run_experiment_suite.py \
+  --registry configs/experiment_registry_voc662_12_methods.yaml \
+  --mode full \
+  --schedule-mode segments \
+  --epoch-targets 20,40,60,80 \
+  --suite-name voc662_12_methods_segments_20_40_60_80 \
+  --queue-backend postgres \
+  --db-url-env AUGSEG_SCHEDULER_DB_URL \
+  --worker-id islab-server3:gpu0 \
+  --server-name islab-server3 \
+  --gpu 0 \
+  --nproc-per-node 1 \
+  --min-free-mb 17000 \
+  --launcher python-module \
+  --loop \
+  --resume \
+  --retry-failed \
+  --max-retries 1
+```
+
+Status output includes `schedule_mode`, `current_epoch`, `target_epoch`, and `next_target_epoch`. Claim order for segments is lowest `current_epoch` first, then method name for stable ordering.
+
 ## Python And Launcher
 
 Use the Python interpreter from the intended training environment. On the A6000 server, use:
