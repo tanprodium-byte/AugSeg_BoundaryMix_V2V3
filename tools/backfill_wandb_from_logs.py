@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from typing import Any
 
 from wandb_log_parser import metric_keys, parse_log_file
@@ -51,6 +52,57 @@ def discover_logs(roots: list[Path], include_glob: str, methods: set[str] | None
                 filtered.append(path)
         logs = filtered
     return sorted(dict.fromkeys(logs))
+
+
+def _path_key(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path.absolute())
+
+
+def running_log_paths_from_postgres(db_url: str, suite_name: str, mode: str) -> set[str]:
+    try:
+        import psycopg
+    except Exception as exc:
+        raise RuntimeError("Postgres active-log filtering requires psycopg.") from exc
+
+    paths: set[str] = set()
+    with psycopg.connect(db_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT log_path
+                FROM experiment_suite_queue
+                WHERE suite_name=%s
+                  AND mode=%s
+                  AND status='running'
+                  AND log_path IS NOT NULL
+                  AND log_path <> ''
+                """,
+                (suite_name, mode),
+            )
+            for (log_path,) in cur.fetchall():
+                paths.add(_path_key(Path(str(log_path))))
+    return paths
+
+
+def active_log_paths(args: argparse.Namespace) -> set[str]:
+    paths: set[str] = set()
+    if args.db_url_env:
+        db_url = os.environ.get(args.db_url_env)
+        if db_url:
+            paths.update(running_log_paths_from_postgres(db_url, args.suite_name, args.mode))
+    if not args.force_active and args.active_mtime_sec > 0:
+        now = time.time()
+        for path in discover_logs(args.log_root, args.include_glob, set(args.method) if args.method else None):
+            try:
+                age_sec = now - path.stat().st_mtime
+            except OSError:
+                continue
+            if age_sec < args.active_mtime_sec:
+                paths.add(_path_key(path))
+    return paths
 
 
 def upload_events(args: argparse.Namespace, grouped: dict[str, list[tuple[Path, list[dict[str, Any]]]]], manifest: dict[str, Any]) -> None:
@@ -119,19 +171,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upload", action="store_true")
     parser.add_argument("--manifest", type=Path, default=Path("runs/wandb_backfill_manifest.json"))
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--skip-active", action="store_true", help="Skip running DB logs and recently modified logs.")
+    parser.add_argument("--force-active", action="store_true", help="Disable recent-mtime active log protection.")
+    parser.add_argument("--active-mtime-sec", type=int, default=120)
+    parser.add_argument("--db-url-env", default="")
+    parser.add_argument("--mode", default="full")
     args = parser.parse_args(argv)
 
     manifest = load_manifest(args.manifest)
     methods = set(args.method) if args.method else None
     logs = discover_logs(args.log_root, args.include_glob, methods)
+    active_paths = active_log_paths(args) if args.skip_active else set()
     grouped: dict[str, list[tuple[Path, list[dict[str, Any]]]]] = {}
     zero_event_logs: list[str] = []
     skipped_manifest: list[str] = []
+    skipped_active: list[str] = []
     fatal_logs: list[str] = []
     total_events = 0
     all_metric_keys: set[str] = set()
 
     for path in logs:
+        if _path_key(path) in active_paths:
+            skipped_active.append(str(path))
+            continue
         if not args.force and str(path) in manifest.get("uploaded_logs", {}):
             skipped_manifest.append(str(path))
             continue
@@ -150,7 +212,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"mode={'upload' if args.upload else 'dry-run'}")
     print(f"project={args.project} group={args.group} suite_name={args.suite_name}")
-    print(f"logs_found={len(logs)} logs_ready={sum(len(v) for v in grouped.values())} parseable_events={total_events}")
+    print(
+        f"logs_found={len(logs)} logs_ready={sum(len(v) for v in grouped.values())} "
+        f"active_logs_skipped={len(skipped_active)} zero_event_logs_count={len(zero_event_logs)} "
+        f"fatal_logs_skipped_count={len(fatal_logs)} manifest_skipped_count={len(skipped_manifest)} "
+        f"parseable_events={total_events}"
+    )
     print("runs:")
     for method, log_events in sorted(grouped.items()):
         count = sum(len(events) for _, events in log_events)
@@ -161,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     print("metric_keys=" + ", ".join(sorted(all_metric_keys)))
     print("zero_event_logs=" + json.dumps(zero_event_logs, indent=2))
     print("fatal_logs_skipped=" + json.dumps(fatal_logs, indent=2))
+    print("active_logs_skipped=" + json.dumps(skipped_active, indent=2))
     print("manifest_skipped=" + json.dumps(skipped_manifest, indent=2))
 
     if not args.upload:
