@@ -68,6 +68,10 @@ EXPECTED_METHOD_COUNT = 12
 DEFAULT_SEGMENT_SUITE_NAME = "voc662_12_methods_segments_20_40_60_80"
 
 
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -507,21 +511,44 @@ def run_process(
     log_path: Path,
     timeout_sec: int | None,
     heartbeat: Any | None = None,
+    line_callback: Any | None = None,
 ) -> tuple[int | None, bool]:
     with log_path.open("a", encoding="utf-8") as log:
         proc = subprocess.Popen(
             cmd,
             cwd=str(ROOT),
             env=env,
-            stdout=log,
+            stdout=subprocess.PIPE if line_callback is not None else log,
             stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,
             start_new_session=True,
         )
         if heartbeat is not None:
             heartbeat(proc.pid)
         try:
-            return proc.wait(timeout=timeout_sec), False
+            if line_callback is None:
+                return proc.wait(timeout=timeout_sec), False
+            deadline = time.monotonic() + timeout_sec if timeout_sec is not None else None
+            assert proc.stdout is not None
+            while True:
+                line = proc.stdout.readline()
+                if line:
+                    log.write(line)
+                    log.flush()
+                    line_callback(line)
+                if proc.poll() is not None:
+                    remainder = proc.stdout.read()
+                    if remainder:
+                        log.write(remainder)
+                        log.flush()
+                        for rest_line in remainder.splitlines(True):
+                            line_callback(rest_line)
+                    return proc.returncode, False
+                if deadline is not None and time.monotonic() > deadline:
+                    raise subprocess.TimeoutExpired(cmd, timeout_sec)
+                if not line:
+                    time.sleep(0.1)
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGTERM)
             try:
@@ -538,6 +565,110 @@ def run_process(
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
             raise
+
+
+class WandbSegmentLogger:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        registry: dict[str, Any],
+        method: dict[str, Any],
+        row: dict[str, Any],
+        run_config: Path,
+        log_path: Path,
+    ) -> None:
+        self.enabled = False
+        self.warning: str | None = None
+        self.run = None
+        self.wandb = None
+        self.parse_line = None
+        self.metric_keys: set[str] = set()
+        if not wandb_enabled(args):
+            return
+        try:
+            import wandb
+            from wandb_log_parser import parse_line
+        except Exception as exc:
+            self.warning = f"warning: W&B disabled: import failed: {exc}"
+            print(self.warning, file=sys.stderr)
+            if args.wandb_require:
+                raise RuntimeError(self.warning)
+            return
+        api_key = os.environ.get("WANDB_API_KEY") or getattr(getattr(wandb, "api", None), "api_key", None)
+        if not api_key:
+            self.warning = "warning: W&B disabled: Need WANDB_API_KEY or wandb login. Do not print the key."
+            print(self.warning, file=sys.stderr)
+            if args.wandb_require:
+                raise RuntimeError(self.warning)
+            return
+
+        git_commit = current_git_commit()
+        run_id = sanitize_wandb_id(f"{registry['suite_name']}__{method['name']}")
+        group = args.wandb_group or os.environ.get("AUGSEG_WANDB_GROUP") or registry["suite_name"]
+        project = args.wandb_project or os.environ.get("AUGSEG_WANDB_PROJECT") or "augseg-voc662"
+        entity = args.wandb_entity or os.environ.get("AUGSEG_WANDB_ENTITY") or None
+        tags = [tag for tag in (args.wandb_tags or os.environ.get("AUGSEG_WANDB_TAGS") or "").split(",") if tag]
+        tags.extend(["segment_scheduler", str(args.server_name or platform.node()), f"gpu{args.gpu}", git_commit])
+        config = {
+            "method": method["name"],
+            "method_group": method.get("group"),
+            "suite_name": registry["suite_name"],
+            "segment_start_epoch": int(row.get("current_epoch") or 0) if args.schedule_mode == "segments" else None,
+            "segment_target_epoch": int(row.get("target_epoch") or 0) if args.schedule_mode == "segments" else None,
+            "server_name": args.server_name or platform.node(),
+            "gpu_id": int(args.gpu),
+            "git_commit": git_commit,
+            "config_path": str(run_config),
+            "log_path": str(log_path),
+        }
+        self.wandb = wandb
+        self.parse_line = parse_line
+        self.run = wandb.init(
+            project=project,
+            entity=entity,
+            group=group,
+            name=method["name"],
+            id=run_id,
+            resume="allow",
+            config=config,
+            tags=tags,
+        )
+        wandb.define_metric("*", step_metric="epoch")
+        self.enabled = True
+
+    def log_line(self, line: str) -> None:
+        if not self.enabled or self.parse_line is None or self.wandb is None:
+            return
+        event = self.parse_line(line)
+        if not event or event.get("fatal") or event.get("event_type") == "metadata":
+            return
+        payload = {
+            key: value
+            for key, value in event.items()
+            if key not in {"event_type", "fatal", "message"} and isinstance(value, (int, float))
+        }
+        if payload:
+            self.metric_keys.update(payload)
+            self.wandb.log(payload)
+
+    def finish(self) -> None:
+        if self.run is not None:
+            self.run.finish()
+
+
+def wandb_enabled(args: argparse.Namespace) -> bool:
+    return bool(args.wandb_enable or env_flag("AUGSEG_WANDB_ENABLE"))
+
+
+def sanitize_wandb_id(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
+
+
+def current_git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=str(ROOT), text=True).strip()
+    except Exception:
+        return "unknown"
 
 
 def base_status_record(
@@ -1472,13 +1603,22 @@ def run_postgres_claimed_method(
         )
     else:
         print(f"postgres running {method['name']} -> {log_path}")
+    wandb_logger = WandbSegmentLogger(args, registry, method, row, run_config, log_path)
     try:
         try:
-            return_code, timed_out = run_process(cmd, env, log_path, args.timeout_sec, heartbeat=first_heartbeat)
+            return_code, timed_out = run_process(
+                cmd,
+                env,
+                log_path,
+                args.timeout_sec,
+                heartbeat=first_heartbeat,
+                line_callback=wandb_logger.log_line if wandb_logger.enabled else None,
+            )
         except Exception as exc:
             queue.finish(registry["suite_name"], method["name"], args.mode, "failed", None, str(exc))
             raise
     finally:
+        wandb_logger.finish()
         stop_event.set()
         thread.join(timeout=5)
     status, last_error = classify_result(return_code, timed_out, args.mode, log_path)
@@ -1756,6 +1896,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--claim-test", action="store_true")
+    parser.add_argument("--wandb-enable", action="store_true")
+    parser.add_argument("--wandb-project", default=None)
+    parser.add_argument("--wandb-entity", default=None)
+    parser.add_argument("--wandb-group", default=None)
+    parser.add_argument("--wandb-tags", default=None)
+    parser.add_argument("--wandb-backfill-compatible-parser", action="store_true")
+    parser.add_argument("--wandb-require", action="store_true")
     return parser.parse_args(argv)
 
 
