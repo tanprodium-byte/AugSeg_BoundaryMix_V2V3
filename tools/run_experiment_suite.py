@@ -608,9 +608,12 @@ class WandbSegmentLogger:
         project = args.wandb_project or os.environ.get("AUGSEG_WANDB_PROJECT") or "augseg-voc662"
         entity = args.wandb_entity or os.environ.get("AUGSEG_WANDB_ENTITY") or None
         tags = [tag for tag in (args.wandb_tags or os.environ.get("AUGSEG_WANDB_TAGS") or "").split(",") if tag]
+        tags.extend([str(tag) for tag in method.get("tags", [])])
         tags.extend(["segment_scheduler", str(args.server_name or platform.node()), f"gpu{args.gpu}", git_commit])
         config = {
             "method": method["name"],
+            "method_display_name": method.get("display_name", method["name"]),
+            "method_description": method.get("description", ""),
             "method_group": method.get("group"),
             "suite_name": registry["suite_name"],
             "segment_start_epoch": int(row.get("current_epoch") or 0) if args.schedule_mode == "segments" else None,
@@ -627,7 +630,7 @@ class WandbSegmentLogger:
             project=project,
             entity=entity,
             group=group,
-            name=method["name"],
+            name=method.get("display_name", method["name"]),
             id=run_id,
             resume="allow",
             config=config,

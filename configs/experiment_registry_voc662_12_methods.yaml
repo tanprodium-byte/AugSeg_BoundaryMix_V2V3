@@ -38,9 +38,29 @@ methods:
   - name: c1_csl_pseudo_selection
     group: csl
     config: exps/boundary_mix_v2_v3/voc_semi662/c1_csl_pseudo_selection/config.yaml
+    display_name: c1_entropy_margin_reliability_weighting
+    description: Entropy-margin proxy reliability soft-weights pseudo CE; not an official CSL implementation.
+    tags:
+      - csl_proxy
+      - entropy_margin
+      - not_official_csl
   - name: c2_csl_random_reliable_masking
     group: csl
     config: exps/boundary_mix_v2_v3/voc_semi662/c2_csl_random_reliable_masking/config.yaml
+    display_name: c2_entropy_margin_random_reliable_masking
+    description: Entropy-margin proxy reliability with stochastic masking; not an official CSL implementation.
+    tags:
+      - csl_proxy
+      - entropy_margin
+      - random_masking
+      - not_official_csl
   - name: c3_csl_guided_cutmix_plus_v3_d2
     group: csl_v3
     config: exps/boundary_mix_v2_v3/voc_semi662/c3_csl_guided_cutmix_plus_v3_d2/config.yaml
+    display_name: c3_entropy_margin_guided_cutmix_plus_v3_d2
+    description: Entropy-margin proxy chooses low-reliability CutMix boxes with V3-d2 BCR; not an official CSL implementation.
+    tags:
+      - csl_proxy
+      - entropy_margin
+      - v3_d2
+      - not_official_csl

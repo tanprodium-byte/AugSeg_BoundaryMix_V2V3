@@ -1,4 +1,4 @@
-# CSL C1/C2/C3 Usage
+# C1/C2/C3 Entropy-Margin Proxy Usage
 
 ## Configs
 
@@ -8,11 +8,13 @@
 
 ## Behavior
 
-C1 keeps random baseline CutMix and uses CSL reliability as a soft CE weight for pseudo pixels. Labeled mixed pixels keep weight `1`.
+C1 keeps random baseline CutMix and uses entropy-margin proxy reliability as a soft CE weight for pseudo pixels. Labeled mixed pixels keep weight `1`.
 
-C2 is C1 plus random masking on reliable pseudo pixels. Labeled mixed pixels are not masked.
+C2 is C1 plus random masking on proxy-reliable pseudo pixels. Labeled mixed pixels are not masked.
 
-C3-clean uses CSL only to choose low-reliability target CutMix boxes. CE still uses the baseline confidence threshold. V3-d2 BCR is enabled. V2 and saliency are disabled.
+C3-clean uses entropy-margin proxy reliability only to choose low-reliability target CutMix boxes. CE still uses the baseline confidence threshold. V3-d2 BCR is enabled. V2 and saliency are disabled.
+
+These configs are not official CSL. The current backend in `util/csl_reliability.py` supports only `reliability_mode: entropy_margin`.
 
 ## Smoke Tests
 
