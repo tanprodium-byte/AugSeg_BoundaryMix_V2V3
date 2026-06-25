@@ -172,6 +172,8 @@ def cut_mix_label_adaptive_with_mask(
     unlabeled_probs=None,
     unlabeled_weight=None,
     labeled_boxes=None,
+    labeled_masks=None,
+    direct_labeled_mix=False,
     target_boxes=None,
 ):
     assert len(lst_confidences) == len(unlabeled_image), "Ensure the confidence is properly obtained"
@@ -190,6 +192,109 @@ def cut_mix_label_adaptive_with_mask(
     labeled_logits = torch.ones_like(labeled_mask)
 
     u_rand_index = torch.randperm(unlabeled_image.size()[0])[:unlabeled_image.size()[0]]
+
+    if labeled_boxes is not None and labeled_masks is not None:
+        raise ValueError("labeled_boxes and labeled_masks cannot both be provided")
+
+    def _return_with_optional_metadata():
+        if return_target_metadata:
+            if mix_unlabeled_probs is not None and mix_unlabeled_weight is not None:
+                return (
+                    mix_unlabeled_image,
+                    mix_unlabeled_target,
+                    mix_unlabeled_logits,
+                    mix_source_mask,
+                    target_component_mask,
+                    target_component_logits,
+                    mix_unlabeled_probs,
+                    mix_unlabeled_weight,
+                )
+            if mix_unlabeled_probs is not None:
+                return (
+                    mix_unlabeled_image,
+                    mix_unlabeled_target,
+                    mix_unlabeled_logits,
+                    mix_source_mask,
+                    target_component_mask,
+                    target_component_logits,
+                    mix_unlabeled_probs,
+                )
+            if mix_unlabeled_weight is not None:
+                return (
+                    mix_unlabeled_image,
+                    mix_unlabeled_target,
+                    mix_unlabeled_logits,
+                    mix_source_mask,
+                    target_component_mask,
+                    target_component_logits,
+                    mix_unlabeled_weight,
+                )
+            return (
+                mix_unlabeled_image,
+                mix_unlabeled_target,
+                mix_unlabeled_logits,
+                mix_source_mask,
+                target_component_mask,
+                target_component_logits,
+            )
+
+        if mix_unlabeled_probs is not None and mix_unlabeled_weight is not None:
+            return mix_unlabeled_image, mix_unlabeled_target, mix_unlabeled_logits, mix_source_mask, mix_unlabeled_probs, mix_unlabeled_weight
+        if mix_unlabeled_probs is not None:
+            return mix_unlabeled_image, mix_unlabeled_target, mix_unlabeled_logits, mix_source_mask, mix_unlabeled_probs
+        if mix_unlabeled_weight is not None:
+            return mix_unlabeled_image, mix_unlabeled_target, mix_unlabeled_logits, mix_source_mask, mix_unlabeled_weight
+        return mix_unlabeled_image, mix_unlabeled_target, mix_unlabeled_logits, mix_source_mask
+
+    if direct_labeled_mix and labeled_boxes is not None:
+        labeled_boxes = torch.as_tensor(labeled_boxes, device=unlabeled_image.device, dtype=torch.long)
+        if labeled_boxes.shape != (unlabeled_image.size(0), 4):
+            raise ValueError("labeled_boxes must have shape [B,4]")
+        shuffled_boxes = labeled_boxes[u_rand_index]
+        batch, height, width = unlabeled_mask.shape
+
+        for i in range(batch):
+            src = int(u_rand_index[i].item())
+            x1, y1, x2, y2 = shuffled_boxes[i].tolist()
+            x1 = max(0, min(int(x1), height))
+            x2 = max(0, min(int(x2), height))
+            y1 = max(0, min(int(y1), width))
+            y2 = max(0, min(int(y2), width))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            mix_unlabeled_image[i, :, x1:x2, y1:y2] = labeled_image[src, :, x1:x2, y1:y2]
+            mix_unlabeled_target[i, x1:x2, y1:y2] = labeled_mask[src, x1:x2, y1:y2]
+            mix_unlabeled_logits[i, x1:x2, y1:y2] = labeled_logits[src, x1:x2, y1:y2]
+            if mix_unlabeled_probs is not None:
+                mix_unlabeled_probs[i, :, x1:x2, y1:y2] = 0.0
+            if mix_unlabeled_weight is not None:
+                mix_unlabeled_weight[i, x1:x2, y1:y2] = 1.0
+            mix_source_mask[i, x1:x2, y1:y2] = 1.0
+
+        return _return_with_optional_metadata()
+
+    if direct_labeled_mix and labeled_masks is not None:
+        labeled_masks = torch.as_tensor(labeled_masks, device=unlabeled_image.device, dtype=torch.bool)
+        if labeled_masks.shape != unlabeled_mask.shape:
+            raise ValueError("labeled_masks must have shape [B,H,W]")
+        shuffled_masks = labeled_masks[u_rand_index]
+
+        for i in range(unlabeled_mask.size(0)):
+            src = int(u_rand_index[i].item())
+            mask = shuffled_masks[i]
+            if not mask.any():
+                continue
+            mix_unlabeled_image[i, :, mask] = labeled_image[src, :, mask]
+            mix_unlabeled_target[i, mask] = labeled_mask[src, mask]
+            mix_unlabeled_logits[i, mask] = labeled_logits[src, mask]
+            if mix_unlabeled_probs is not None:
+                mix_unlabeled_probs[i, :, mask] = 0.0
+            if mix_unlabeled_weight is not None:
+                mix_unlabeled_weight[i, mask] = 1.0
+            mix_source_mask[i, mask] = 1.0
+
+        return _return_with_optional_metadata()
 
     if labeled_boxes is None:
         l_bbx1, l_bby1, l_bbx2, l_bby2 = _rand_bbox(unlabeled_image.size(), lam=np.random.beta(8, 2))

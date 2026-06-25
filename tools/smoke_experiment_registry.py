@@ -19,6 +19,7 @@ from tools.run_experiment_suite import (  # noqa: E402
 )
 
 REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods.yaml"
+DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods_direct_s1s2s3_20_40_60_80.yaml"
 
 
 def require(condition: bool, message: str) -> None:
@@ -81,6 +82,41 @@ def test_config_matrix(registry: dict) -> None:
         config = cfg(method)
         if not method["name"].startswith("c"):
             require(not enabled(config, "csl"), f"{method['name']} must not enable CSL")
+
+
+def test_direct_config_matrix(registry: dict) -> None:
+    require(registry["suite_name"] == "voc662_12_methods_direct_s1s2s3_20_40_60_80", "direct suite name mismatch")
+    by_name = {m["name"]: m for m in registry["methods"]}
+    for legacy_name in (
+        "s1_saliency_box_cutmix",
+        "s2_saliency_component_box_cutmix",
+        "s3_saliency_component_box_plus_v3_d2",
+    ):
+        require(legacy_name not in by_name, f"direct suite must replace legacy method {legacy_name}")
+
+    s1 = cfg(by_name["s1_saliency_box_direct_cutmix"])
+    require(s1["saliency_cutmix"]["mode"] == "box", "direct S1 must use box mode")
+    require(s1["saliency_cutmix"]["direct_labeled_mix"] is True, "direct S1 must enable direct_labeled_mix")
+    require(not enabled(s1, "boundary_compatibility"), "direct S1 must not enable V3")
+    require(not enabled(s1, "csl"), "direct S1 must not enable CSL")
+
+    s2 = cfg(by_name["s2_saliency_component_mask_direct_cutmix"])
+    require(s2["saliency_cutmix"]["mode"] == "component_mask", "direct S2 must use component_mask mode")
+    require(s2["saliency_cutmix"]["direct_labeled_mix"] is True, "direct S2 must enable direct_labeled_mix")
+    require(s2["saliency_cutmix"]["paste_mode"] == "mask", "direct S2 must paste masks")
+    require(not enabled(s2, "boundary_compatibility"), "direct S2 must not enable V3")
+    require(not enabled(s2, "csl"), "direct S2 must not enable CSL")
+
+    s3 = cfg(by_name["s3_saliency_component_mask_direct_plus_v3_d2"])
+    require(s3["saliency_cutmix"]["mode"] == "component_mask", "direct S3 must use component_mask mode")
+    require(s3["saliency_cutmix"]["direct_labeled_mix"] is True, "direct S3 must enable direct_labeled_mix")
+    require(s3["saliency_cutmix"]["paste_mode"] == "mask", "direct S3 must paste masks")
+    require(enabled(s3, "boundary_compatibility"), "direct S3 must enable V3")
+    require(int(s3["boundary_compatibility"].get("pair_radius")) == 2, "direct S3 must be V3-d2")
+    require(float(s3["boundary_compatibility"].get("lambda_bcr")) == 0.01, "direct S3 BCR lambda mismatch")
+    require(s3["boundary_compatibility"].get("use_component_gate") is False, "direct S3 must not use component gate")
+    require(not enabled(s3, "boundary_component"), "direct S3 must not enable V2")
+    require(not enabled(s3, "csl"), "direct S3 must not enable CSL")
 
 
 def test_dry_run(registry: dict) -> None:
@@ -204,6 +240,9 @@ def main() -> int:
     test_dry_run(registry)
     test_segment_dry_run(registry)
     test_postgres_cli_args()
+    direct_registry = load_registry(DIRECT_REGISTRY)
+    test_registry_shape(direct_registry)
+    test_direct_config_matrix(direct_registry)
     print("VOC662 12-method registry smoke tests passed")
     return 0
 

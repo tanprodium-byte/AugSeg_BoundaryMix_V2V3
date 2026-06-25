@@ -10,6 +10,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from util.boundary_mix import cut_mix_label_adaptive_with_mask
+import util.boundary_mix as boundary_mix
 from util.saliency_cutmix import (
     boxes_to_masks,
     box_mean_saliency,
@@ -149,6 +150,45 @@ def test_random_fallback_wrapper_path():
     assert torch.isfinite(image).all()
 
 
+def test_direct_box_paste_skips_target_random_second_step():
+    torch.manual_seed(4)
+    np.random.seed(4)
+    batch, height, width = 1, 8, 8
+    unlabeled_image = torch.zeros(batch, 3, height, width)
+    unlabeled_mask = torch.zeros(batch, height, width, dtype=torch.long)
+    unlabeled_logits = torch.zeros(batch, height, width)
+    labeled_image = torch.full((batch, 3, height, width), 7.0)
+    labeled_mask = torch.full((batch, height, width), 3, dtype=torch.long)
+    confidence = [0.0]
+    labeled_boxes = torch.tensor([[2, 3, 5, 7]])
+
+    old_rand_bbox = boundary_mix._rand_bbox
+    try:
+        def fail_rand_bbox(*args, **kwargs):
+            raise AssertionError("direct box path must not call target random _rand_bbox")
+
+        boundary_mix._rand_bbox = fail_rand_bbox
+        image, mask, logits, source_mask = cut_mix_label_adaptive_with_mask(
+            unlabeled_image,
+            unlabeled_mask,
+            unlabeled_logits,
+            labeled_image,
+            labeled_mask,
+            confidence,
+            labeled_boxes=labeled_boxes,
+            direct_labeled_mix=True,
+        )
+    finally:
+        boundary_mix._rand_bbox = old_rand_bbox
+
+    expected = torch.zeros_like(unlabeled_image)
+    expected[:, :, 2:5, 3:7] = 7.0
+    assert torch.equal(image, expected)
+    assert torch.equal(mask[:, 2:5, 3:7], torch.full((1, 3, 4), 3, dtype=torch.long))
+    assert source_mask[:, 2:5, 3:7].sum().item() == 12
+    assert source_mask.sum().item() == 12
+
+
 def test_numeric_logger_stats():
     _, probs = sample_box_by_softmax(torch.ones(2, 3), temperature=0.2)
     assert torch.isfinite(probs).all()
@@ -164,6 +204,7 @@ def main():
     test_get_saliency_guided_boxes_restores_teacher()
     test_box_coordinate_convention_matches_boundary_mix()
     test_random_fallback_wrapper_path()
+    test_direct_box_paste_skips_target_random_second_step()
     test_numeric_logger_stats()
     print("S1 saliency CutMix smoke tests passed")
 

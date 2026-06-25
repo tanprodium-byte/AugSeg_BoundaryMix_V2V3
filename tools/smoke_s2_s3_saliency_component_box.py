@@ -15,8 +15,10 @@ from util.saliency_cutmix import (
     connected_components_from_gt,
     expand_box,
     get_saliency_component_guided_boxes,
+    get_saliency_component_guided_masks,
     get_saliency_guided_boxes,
 )
+from util.boundary_mix import cut_mix_label_adaptive_with_mask
 
 
 class FakeTeacher(nn.Module):
@@ -163,6 +165,81 @@ def test_component_box_returns_boxes_and_stats():
     assert stats["saliency/fallback_ratio"] == 0.0
 
 
+def test_component_mask_returns_bool_masks_and_stats():
+    torch.manual_seed(5)
+    np.random.seed(5)
+    teacher = FakeTeacher(num_classes=3)
+    image = torch.randn(2, 3, 16, 16)
+    label = torch.zeros(2, 16, 16, dtype=torch.long)
+    label[0, 2:12, 2:12] = 1
+    label[1, 3:14, 4:15] = 2
+
+    masks, stats = get_saliency_component_guided_masks(
+        teacher,
+        image,
+        label,
+        _base_sampler,
+        temperature=0.2,
+        ignore_index=255,
+        min_component_area=64,
+        max_component_area=20000,
+        lam_sampler=lambda: 0.5,
+    )
+    assert masks.shape == (2, 16, 16)
+    assert masks.dtype == torch.bool
+    assert masks.device == image.device
+    assert stats["saliency/fallback_ratio"] == 0.0
+
+
+def test_direct_component_mask_paste_only_changes_selected_mask():
+    batch, height, width = 1, 10, 12
+    unlabeled_image = torch.zeros(batch, 3, height, width)
+    unlabeled_mask = torch.zeros(batch, height, width, dtype=torch.long)
+    unlabeled_logits = torch.zeros(batch, height, width)
+    labeled_image = torch.full((batch, 3, height, width), 9.0)
+    labeled_mask = torch.full((batch, height, width), 4, dtype=torch.long)
+    labeled_masks = torch.zeros(batch, height, width, dtype=torch.bool)
+    labeled_masks[0, 2:6, 3:8] = True
+
+    image, mask, logits, source_mask = cut_mix_label_adaptive_with_mask(
+        unlabeled_image,
+        unlabeled_mask,
+        unlabeled_logits,
+        labeled_image,
+        labeled_mask,
+        [0.0],
+        labeled_masks=labeled_masks,
+        direct_labeled_mix=True,
+    )
+
+    outside = ~labeled_masks
+    assert torch.equal(image[0, :, labeled_masks[0]], torch.full((3, int(labeled_masks.sum().item())), 9.0))
+    assert torch.equal(image[0, :, outside[0]], torch.zeros_like(image[0, :, outside[0]]))
+    assert torch.equal(mask[0, labeled_masks[0]], torch.full((int(labeled_masks.sum().item()),), 4, dtype=torch.long))
+    assert torch.equal(mask[0, outside[0]], torch.zeros_like(mask[0, outside[0]]))
+    assert source_mask.sum().item() == labeled_masks.sum().item()
+
+
+def test_s3_direct_config_enables_component_mask_and_v3_d2_without_v2_or_csl():
+    config_path = os.path.join(
+        ROOT,
+        "exps/boundary_mix_v2_v3/voc_semi662/s3_saliency_component_mask_direct_plus_v3_d2/config.yaml",
+    )
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    assert cfg["saliency_cutmix"]["enabled"] is True
+    assert cfg["saliency_cutmix"]["mode"] == "component_mask"
+    assert cfg["saliency_cutmix"]["direct_labeled_mix"] is True
+    assert cfg["saliency_cutmix"]["paste_mode"] == "mask"
+    assert cfg["boundary_component"]["enabled"] is False
+    assert cfg["boundary_compatibility"]["enabled"] is True
+    assert cfg["boundary_compatibility"]["pair_radius"] == 2
+    assert cfg["boundary_compatibility"]["lambda_bcr"] == 0.01
+    assert cfg["boundary_compatibility"]["use_component_gate"] is False
+    assert cfg["csl"]["enabled"] is False
+
+
 def test_s3_config_enables_v3_d2_without_v2_or_csl():
     config_path = os.path.join(
         ROOT,
@@ -187,7 +264,10 @@ def main():
     test_bbox_and_expand_convention()
     test_component_box_fallback_when_no_valid_component()
     test_component_box_returns_boxes_and_stats()
+    test_component_mask_returns_bool_masks_and_stats()
+    test_direct_component_mask_paste_only_changes_selected_mask()
     test_s3_config_enables_v3_d2_without_v2_or_csl()
+    test_s3_direct_config_enables_component_mask_and_v3_d2_without_v2_or_csl()
     print("S2/S3 saliency component-box smoke tests passed")
 
 

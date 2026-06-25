@@ -34,7 +34,11 @@ from util.boundary_component import compute_component_weights
 from util.boundary_compatibility import compute_js_boundary_compatibility_loss
 from util.csl_cutmix import get_csl_guided_boxes
 from util.csl_reliability import apply_csl_random_reliable_mask, compute_csl_reliability
-from util.saliency_cutmix import get_saliency_component_guided_boxes, get_saliency_guided_boxes
+from util.saliency_cutmix import (
+    get_saliency_component_guided_boxes,
+    get_saliency_component_guided_masks,
+    get_saliency_guided_boxes,
+)
 from tools.visualize_boundary_mix_debug import save_boundary_mix_debug
 from util.run_logging import (
     get_or_create_run_id,
@@ -603,6 +607,8 @@ def main(in_args):
     cfg["saliency_cutmix"].setdefault("temperature", 0.2)
     cfg["saliency_cutmix"].setdefault("apply_to", "labeled_source_only")
     cfg["saliency_cutmix"].setdefault("fallback", "random_box")
+    cfg["saliency_cutmix"].setdefault("direct_labeled_mix", False)
+    cfg["saliency_cutmix"].setdefault("paste_mode", "box")
     cfg["saliency_cutmix"].setdefault("component_source", "labeled_gt")
     cfg["saliency_cutmix"].setdefault("connectivity", 8)
     cfg["saliency_cutmix"].setdefault("foreground_only", True)
@@ -1277,6 +1283,7 @@ def train(
                     label_u_before = label_u_aug.clone()                    
 
                 saliency_labeled_boxes = None
+                saliency_labeled_masks = None
                 csl_target_boxes = None
                 if saliency_cutmix_enabled:
                     try:
@@ -1311,10 +1318,28 @@ def train(
                                 max_component_area=int(saliency_cutmix_cfg.get("max_component_area", 20000)),
                                 box_expand_ratio=float(saliency_cutmix_cfg.get("box_expand_ratio", 1.2)),
                             )
+                        elif saliency_mode == "component_mask":
+                            if saliency_cutmix_cfg.get("component_source", "labeled_gt") != "labeled_gt":
+                                raise ValueError("saliency_cutmix.component_source currently supports 'labeled_gt' only")
+                            saliency_labeled_masks, saliency_stats = get_saliency_component_guided_masks(
+                                model_teacher,
+                                image_l,
+                                label_l,
+                                _rand_bbox,
+                                temperature=float(saliency_cutmix_cfg.get("temperature", 0.2)),
+                                ignore_index=int(saliency_cutmix_cfg.get("ignore_label", cfg["dataset"].get("ignore_label", 255))),
+                                eps=float(saliency_cutmix_cfg.get("eps", 1e-6)),
+                                lam_sampler=lambda: np.random.beta(8, 2),
+                                connectivity=int(saliency_cutmix_cfg.get("connectivity", 8)),
+                                foreground_only=bool(saliency_cutmix_cfg.get("foreground_only", True)),
+                                min_component_area=int(saliency_cutmix_cfg.get("min_component_area", 64)),
+                                max_component_area=int(saliency_cutmix_cfg.get("max_component_area", 20000)),
+                            )
                         else:
                             raise ValueError("Unsupported saliency_cutmix.mode: %s" % saliency_mode)
                     except Exception as exc:
                         saliency_labeled_boxes = None
+                        saliency_labeled_masks = None
                         saliency_stats = {
                             "saliency/fallback_ratio": 1.0,
                             "saliency/source_is_labeled_ratio": 1.0,
@@ -1358,6 +1383,8 @@ def train(
                             unlabeled_probs=teacher_probs_u_aug,
                             unlabeled_weight=csl_weight_u if csl_use_ce_weight else None,
                             labeled_boxes=saliency_labeled_boxes,
+                            labeled_masks=saliency_labeled_masks,
+                            direct_labeled_mix=bool(saliency_cutmix_cfg.get("direct_labeled_mix", False)),
                             target_boxes=csl_target_boxes,
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:
@@ -1407,6 +1434,8 @@ def train(
                             unlabeled_probs=teacher_probs_u_aug,
                             unlabeled_weight=csl_weight_u if csl_use_ce_weight else None,
                             labeled_boxes=saliency_labeled_boxes,
+                            labeled_masks=saliency_labeled_masks,
+                            direct_labeled_mix=bool(saliency_cutmix_cfg.get("direct_labeled_mix", False)),
                             target_boxes=csl_target_boxes,
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:

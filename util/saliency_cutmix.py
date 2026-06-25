@@ -386,6 +386,90 @@ def get_saliency_component_guided_boxes(
     return selected_boxes.detach(), stats
 
 
+def get_saliency_component_guided_masks(
+    teacher,
+    source_images,
+    source_labels,
+    base_box_sampler,
+    *,
+    temperature=0.2,
+    ignore_index=255,
+    eps=1e-6,
+    lam_sampler=None,
+    connectivity=8,
+    foreground_only=True,
+    min_component_area=64,
+    max_component_area=20000,
+):
+    saliency = compute_labeled_teacher_saliency(
+        teacher,
+        source_images,
+        source_labels,
+        ignore_index=ignore_index,
+        eps=eps,
+    )
+    lam = lam_sampler() if lam_sampler is not None else None
+    try:
+        fallback_sample = base_box_sampler(source_images.size(), lam=lam)
+    except TypeError:
+        fallback_sample = base_box_sampler(source_images.size())
+    fallback_boxes = _boxes_from_sampler_output(fallback_sample, device=source_images.device)
+
+    batch, height, width = source_labels.shape
+    selected_masks = boxes_to_masks(
+        fallback_boxes,
+        (batch, height, width),
+        device=source_images.device,
+        dtype=torch.bool,
+    )
+    component_records = []
+    selected_records = []
+    fallback_count = 0
+
+    for b in range(batch):
+        components = connected_components_from_gt(
+            source_labels[b],
+            ignore_label=ignore_index,
+            foreground_only=foreground_only,
+            connectivity=connectivity,
+            min_component_area=min_component_area,
+            max_component_area=max_component_area,
+        )
+        records = []
+        for component in components:
+            mask = torch.as_tensor(component["mask"], device=saliency.device, dtype=torch.bool)
+            sal_score = float(saliency[b][mask].mean().item()) if mask.any() else 0.0
+            area_score = float(component["area"]) / float(max(height * width, 1))
+            score = sal_score * area_score
+            records.append({**component, "saliency_score": sal_score, "area_score": area_score, "score": score})
+
+        component_records.append(records)
+        if not records:
+            fallback_count += 1
+            selected_records.append(None)
+            continue
+
+        score_tensor = torch.tensor([[rec["score"] for rec in records]], device=source_images.device, dtype=torch.float32)
+        selected_idx, probs = sample_box_by_softmax(score_tensor, temperature=temperature, eps=eps)
+        idx = int(selected_idx.item())
+        selected = records[idx]
+        selected_masks[b] = torch.as_tensor(selected["mask"], device=source_images.device, dtype=torch.bool)
+        entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1)
+        entropy = entropy / math.log(max(len(records), 2))
+        selected_records.append(
+            {
+                **selected,
+                "box": selected["bbox"],
+                "entropy": float(entropy.item()),
+                "prob_selected": float(probs[0, idx].item()),
+                "prob_max": float(probs.max(dim=1).values.item()),
+            }
+        )
+
+    stats = _component_stats(component_records, selected_records, fallback_count, batch)
+    return selected_masks.detach().to(device=source_images.device, dtype=torch.bool), stats
+
+
 def get_saliency_guided_boxes(
     teacher,
     source_images,
