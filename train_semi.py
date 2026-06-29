@@ -33,6 +33,10 @@ from util.boundary_mix import (
 from util.boundary_component import compute_component_weights
 from util.boundary_compatibility import compute_js_boundary_compatibility_loss
 from util.csl_cutmix import get_csl_guided_boxes
+from util.csl_official import (
+    apply_csl_reliable_mask_perturbation,
+    compute_csl_official_selection,
+)
 from util.csl_reliability import apply_csl_random_reliable_mask, compute_csl_reliability
 from util.saliency_cutmix import (
     get_saliency_component_guided_boxes,
@@ -286,8 +290,10 @@ def build_iter_log_columns():
         "csl/enabled",
         "csl/mode",
         "csl/use_csl_for_ce_weight",
+        "csl/use_csl_for_mix_confidence",
         "csl/use_csl_for_cutmix",
         "csl/random_mask_reliable",
+        "csl/perturb_input",
         "csl/mean_reliability",
         "csl/reliability_std",
         "csl/reliability_min",
@@ -295,10 +301,15 @@ def build_iter_log_columns():
         "csl/confidence_mean",
         "csl/entropy_mean",
         "csl/margin_mean",
+        "csl/residual_variance_mean",
+        "csl/official_weight_valid_mean",
+        "csl/reliable_ratio",
+        "csl/sample_reliability_mean",
         "csl/mask_prob",
         "csl/masked_ratio",
         "csl/raw_reliability_mean",
         "csl/effective_weight_mean",
+        "csl/perturb_reliable_ratio",
         "csl_ce/weight_mean",
         "csl_ce/weight_sum",
         "csl_cutmix/enabled",
@@ -629,9 +640,15 @@ def main(in_args):
     cfg["csl"].setdefault("output", "soft_weight")
     cfg["csl"].setdefault("detach_reliability", True)
     cfg["csl"].setdefault("use_csl_for_ce_weight", False)
+    cfg["csl"].setdefault("use_csl_for_mix_confidence", False)
     cfg["csl"].setdefault("use_csl_for_cutmix", False)
     cfg["csl"].setdefault("random_mask_reliable", False)
+    cfg["csl"].setdefault("perturb_input", False)
     cfg["csl"].setdefault("mask_prob", 0.3)
+    cfg["csl"].setdefault("mask_mode", "zero")
+    cfg["csl"].setdefault("block_size", 1)
+    cfg["csl"].setdefault("cover_ratio", 1.0)
+    cfg["csl"].setdefault("alpha", 8.0)
     cfg["csl"].setdefault("mask_labeled_pixels", False)
     cfg["csl"].setdefault("debug_log", False)
     cfg["csl"].setdefault("eps", 1e-6)
@@ -1118,8 +1135,16 @@ def train(
     saliency_cutmix_debug_enabled = bool(saliency_cutmix_cfg.get("debug_log", False))
     csl_cfg = cfg.get("csl", {})
     csl_enabled = bool(csl_cfg.get("enabled", False))
+    csl_mode = csl_cfg.get("mode", "disabled")
+    csl_reliability_mode = csl_cfg.get("reliability_mode", "entropy_margin")
+    csl_official_enabled = csl_enabled and (
+        csl_mode in ("official_reliability_replace_confidence", "official_reliable_mask_perturbation")
+        or csl_reliability_mode == "official_pcos"
+    )
     csl_use_ce_weight = csl_enabled and bool(csl_cfg.get("use_csl_for_ce_weight", False))
+    csl_use_mix_confidence = csl_enabled and bool(csl_cfg.get("use_csl_for_mix_confidence", False))
     csl_use_cutmix = csl_enabled and bool(csl_cfg.get("use_csl_for_cutmix", False))
+    csl_perturb_input = csl_official_enabled and bool(csl_cfg.get("perturb_input", False))
     csl_debug_enabled = bool(csl_cfg.get("debug_log", False))
     csl_cutmix_cfg = cfg.get("csl_cutmix", {})
     csl_cutmix_enabled = csl_use_cutmix and bool(csl_cutmix_cfg.get("enabled", False))
@@ -1171,6 +1196,7 @@ def train(
         csl_cutmix_stats = None
         csl_reliability_u = None
         csl_weight_u = None
+        csl_reliable_mask_u = None
 
         i_iter = epoch * len(loader_l) + step # total iters till now
         # log schedule (đúng y hệt block W&B phía dưới)
@@ -1201,13 +1227,14 @@ def train(
         # - cũ: (idx, weak, strong, label)
         # - mới: (idx, weak, strong, label, k_ids, t_vals)
         if len(batch_u) == 4:
-            _, image_u_weak, image_u_aug, _ = batch_u
+            _, image_u_weak, image_u_aug, label_u_ignore = batch_u
             k_ids, t_vals = None, None
         else:
-            _, image_u_weak, image_u_aug, _, k_ids, t_vals = batch_u
+            _, image_u_weak, image_u_aug, label_u_ignore, k_ids, t_vals = batch_u
 
         image_u_weak = image_u_weak.cuda(local_rank, non_blocking=True)
         image_u_aug  = image_u_aug.cuda(local_rank, non_blocking=True)
+        label_u_ignore = label_u_ignore.cuda(local_rank, non_blocking=True)
     
         
         # start the training
@@ -1236,28 +1263,44 @@ def train(
                 pred_u = F.softmax(pred_u, dim=1)
                 if boundary_compatibility_enabled:
                     teacher_probs_u_aug = pred_u.detach().clone()
-                if csl_enabled:
-                    csl_reliability_u, csl_stats = compute_csl_reliability(
-                        pred_u,
-                        cfg=csl_cfg,
-                    )
-                    csl_weight_u = csl_reliability_u
-                    if csl_use_ce_weight and bool(csl_cfg.get("random_mask_reliable", False)):
-                        csl_weight_u, csl_mask_stats = apply_csl_random_reliable_mask(
-                            csl_reliability_u,
-                            mask_prob=float(csl_cfg.get("mask_prob", 0.3)),
-                            training=model.training,
-                        )
                 # obtain pseudos
                 logits_u_aug, label_u_aug = torch.max(pred_u, dim=1)
+                if csl_enabled:
+                    if csl_official_enabled:
+                        official_ignore = label_u_ignore if label_u_ignore.shape == label_u_aug.shape else None
+                        csl_selection = compute_csl_official_selection(
+                            pred_u,
+                            ignore_mask=official_ignore,
+                            alpha=float(csl_cfg.get("alpha", 8.0)),
+                            eps=float(csl_cfg.get("eps", 1e-8)),
+                        )
+                        csl_reliability_u = csl_selection["weight"]
+                        csl_weight_u = csl_selection["weight"]
+                        csl_reliable_mask_u = csl_selection["reliable_mask"]
+                        csl_stats = csl_selection.get("stats", {})
+                        if csl_use_mix_confidence:
+                            confidence = csl_selection["sample_reliability"].cpu().numpy().tolist()
+                    else:
+                        csl_reliability_u, csl_stats = compute_csl_reliability(
+                            pred_u,
+                            cfg=csl_cfg,
+                        )
+                        csl_weight_u = csl_reliability_u
+                        if csl_use_ce_weight and bool(csl_cfg.get("random_mask_reliable", False)):
+                            csl_weight_u, csl_mask_stats = apply_csl_random_reliable_mask(
+                                csl_reliability_u,
+                                mask_prob=float(csl_cfg.get("mask_prob", 0.3)),
+                                training=model.training,
+                            )
                 
                 # obtain confidence
                 entropy = -torch.sum(pred_u * torch.log(pred_u + 1e-10), dim=1)
                 entropy /= np.log(cfg["net"]["num_classes"])
-                confidence = 1.0 - entropy
-                confidence = confidence * logits_u_aug
-                confidence = confidence.mean(dim=[1,2])  # 1*C
-                confidence = confidence.cpu().numpy().tolist()
+                if not (csl_official_enabled and csl_use_mix_confidence):
+                    confidence = 1.0 - entropy
+                    confidence = confidence * logits_u_aug
+                    confidence = confidence.mean(dim=[1,2])  # 1*C
+                    confidence = confidence.cpu().numpy().tolist()
                 # effect stats: entropy mean (teacher on weak)
                 u_entropy_mean = float(entropy.detach().mean().item())
 
@@ -1519,6 +1562,42 @@ def train(
                 u_maxprob_p90 = float(q[2].item())
 
                 u_pseudo_ratio_mean = float((mp >= p_threshold).float().mean().item())
+
+            if csl_perturb_input and (csl_weight_u is not None or csl_reliable_mask_u is not None):
+                if csl_weight_u is not None:
+                    reliable_for_perturb = torch.isclose(
+                        csl_weight_u.detach(),
+                        torch.ones_like(csl_weight_u.detach()),
+                        rtol=1e-5,
+                        atol=1e-6,
+                    )
+                    reliable_for_perturb = reliable_for_perturb & label_u_aug.detach().ne(ignore)
+                else:
+                    reliable_for_perturb = csl_reliable_mask_u
+                if mix_source_mask is not None and not bool(csl_cfg.get("mask_labeled_pixels", False)):
+                    reliable_for_perturb = reliable_for_perturb & ~mix_source_mask.detach().bool()
+                image_u_aug, _, perturb_stats = apply_csl_reliable_mask_perturbation(
+                    image_u_aug,
+                    reliable_for_perturb,
+                    mask_prob=float(csl_cfg.get("mask_prob", 0.3)),
+                    block_size=int(csl_cfg.get("block_size", 1)),
+                    cover_ratio=float(csl_cfg.get("cover_ratio", 1.0)),
+                    mode=csl_cfg.get("mask_mode", "zero"),
+                )
+                if csl_mask_stats is None:
+                    csl_mask_stats = {}
+                csl_mask_stats.update(perturb_stats)
+                if rank == 0 and csl_debug_enabled and (step < int(csl_cfg.get("debug_first_batches", 3)) or do_log_now):
+                    logger.info(
+                        "[csl_official] epoch=%d step=%d global_iter=%d perturb_reliable_ratio=%.6f masked_ratio=%.6f"
+                        % (
+                            epoch,
+                            step,
+                            i_iter,
+                            csl_mask_stats.get("csl/perturb_reliable_ratio", float("nan")),
+                            csl_mask_stats.get("csl/masked_ratio", float("nan")),
+                        )
+                    )
 
 
 
@@ -2043,13 +2122,17 @@ def train(
                         "pseudo_selection": 1.0,
                         "random_reliable_masking": 2.0,
                         "guided_cutmix": 3.0,
+                        "official_reliability_replace_confidence": 4.0,
+                        "official_reliable_mask_perturbation": 5.0,
                     }.get(csl_cfg.get("mode", "disabled"), -1.0)
                     log_dict.update({
                         "csl/enabled": 1.0,
                         "csl/mode": csl_mode_value,
                         "csl/use_csl_for_ce_weight": float(csl_use_ce_weight),
+                        "csl/use_csl_for_mix_confidence": float(csl_use_mix_confidence),
                         "csl/use_csl_for_cutmix": float(csl_use_cutmix),
                         "csl/random_mask_reliable": float(bool(csl_cfg.get("random_mask_reliable", False))),
+                        "csl/perturb_input": float(csl_perturb_input),
                     })
                     for stats_dict in (csl_stats, csl_mask_stats):
                         if stats_dict is None:

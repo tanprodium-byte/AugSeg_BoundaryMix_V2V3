@@ -265,7 +265,9 @@ def cut_mix_label_adaptive_with_mask(
 
             mix_unlabeled_image[i, :, x1:x2, y1:y2] = labeled_image[src, :, x1:x2, y1:y2]
             mix_unlabeled_target[i, x1:x2, y1:y2] = labeled_mask[src, x1:x2, y1:y2]
-            mix_unlabeled_logits[i, x1:x2, y1:y2] = labeled_logits[src, x1:x2, y1:y2]
+            mix_unlabeled_logits[i, x1:x2, y1:y2] = labeled_logits[src, x1:x2, y1:y2].to(
+                dtype=mix_unlabeled_logits.dtype
+            )
             if mix_unlabeled_probs is not None:
                 mix_unlabeled_probs[i, :, x1:x2, y1:y2] = 0.0
             if mix_unlabeled_weight is not None:
@@ -287,7 +289,7 @@ def cut_mix_label_adaptive_with_mask(
                 continue
             mix_unlabeled_image[i, :, mask] = labeled_image[src, :, mask]
             mix_unlabeled_target[i, mask] = labeled_mask[src, mask]
-            mix_unlabeled_logits[i, mask] = labeled_logits[src, mask]
+            mix_unlabeled_logits[i, mask] = labeled_logits[src, mask].to(dtype=mix_unlabeled_logits.dtype)
             if mix_unlabeled_probs is not None:
                 mix_unlabeled_probs[i, :, mask] = 0.0
             if mix_unlabeled_weight is not None:
@@ -320,7 +322,9 @@ def cut_mix_label_adaptive_with_mask(
             )
 
             mix_unlabeled_logits[i, l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]] = (
-                labeled_logits[u_rand_index[i], l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]]
+                labeled_logits[u_rand_index[i], l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]].to(
+                    dtype=mix_unlabeled_logits.dtype
+                )
             )
             if mix_unlabeled_probs is not None:
                 mix_unlabeled_probs[i, :, l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]] = 0.0

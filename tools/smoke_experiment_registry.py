@@ -20,6 +20,7 @@ from tools.run_experiment_suite import (  # noqa: E402
 
 REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods.yaml"
 DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods_direct_s1s2s3_20_40_60_80.yaml"
+CSLFIX_DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods_direct_s1s2s3_cslfix_20_40_60_80.yaml"
 
 
 def require(condition: bool, message: str) -> None:
@@ -84,8 +85,11 @@ def test_config_matrix(registry: dict) -> None:
             require(not enabled(config, "csl"), f"{method['name']} must not enable CSL")
 
 
-def test_direct_config_matrix(registry: dict) -> None:
-    require(registry["suite_name"] == "voc662_12_methods_direct_s1s2s3_20_40_60_80", "direct suite name mismatch")
+def test_direct_config_matrix(
+    registry: dict,
+    expected_suite_name: str = "voc662_12_methods_direct_s1s2s3_20_40_60_80",
+) -> None:
+    require(registry["suite_name"] == expected_suite_name, "direct suite name mismatch")
     by_name = {m["name"]: m for m in registry["methods"]}
     for legacy_name in (
         "s1_saliency_box_cutmix",
@@ -117,6 +121,49 @@ def test_direct_config_matrix(registry: dict) -> None:
     require(s3["boundary_compatibility"].get("use_component_gate") is False, "direct S3 must not use component gate")
     require(not enabled(s3, "boundary_component"), "direct S3 must not enable V2")
     require(not enabled(s3, "csl"), "direct S3 must not enable CSL")
+
+
+def test_cslfix_direct_config_matrix(registry: dict) -> None:
+    require(
+        registry["suite_name"] == "voc662_12_methods_direct_s1s2s3_cslfix_20_40_60_80",
+        "cslfix direct suite name mismatch",
+    )
+    by_name = {m["name"]: m for m in registry["methods"]}
+    require("c1_csl_pseudo_selection" not in by_name, "cslfix suite must not use legacy C1")
+    require("c2_csl_random_reliable_masking" not in by_name, "cslfix suite must not use legacy C2")
+    require(
+        "c1_csl_official_reliability_replace_confidence" in by_name,
+        "cslfix suite missing official C1",
+    )
+    require(
+        "c2_csl_official_reliable_mask_perturbation" in by_name,
+        "cslfix suite missing official C2",
+    )
+
+    test_direct_config_matrix(registry, "voc662_12_methods_direct_s1s2s3_cslfix_20_40_60_80")
+
+    c1 = cfg(by_name["c1_csl_official_reliability_replace_confidence"])
+    require(enabled(c1, "csl"), "official C1 must enable CSL")
+    require(c1["csl"]["mode"] == "official_reliability_replace_confidence", "official C1 mode mismatch")
+    require(c1["csl"]["reliability_mode"] == "official_pcos", "official C1 reliability mismatch")
+    require(c1["csl"]["use_csl_for_ce_weight"] is True, "official C1 must weight CE")
+    require(c1["csl"]["use_csl_for_mix_confidence"] is True, "official C1 must replace mix confidence")
+    require(c1["csl"]["random_mask_reliable"] is False, "official C1 must not random-mask reliable pixels")
+    require(c1["csl"]["use_csl_for_cutmix"] is False, "official C1 must not use CSL CutMix")
+    require(not enabled(c1, "boundary_compatibility"), "official C1 must not enable V3")
+    require(not enabled(c1, "saliency_cutmix"), "official C1 must not enable saliency")
+
+    c2 = cfg(by_name["c2_csl_official_reliable_mask_perturbation"])
+    require(enabled(c2, "csl"), "official C2 must enable CSL")
+    require(c2["csl"]["mode"] == "official_reliable_mask_perturbation", "official C2 mode mismatch")
+    require(c2["csl"]["reliability_mode"] == "official_pcos", "official C2 reliability mismatch")
+    require(c2["csl"]["use_csl_for_ce_weight"] is True, "official C2 must weight CE")
+    require(c2["csl"]["use_csl_for_mix_confidence"] is True, "official C2 must replace mix confidence")
+    require(c2["csl"]["random_mask_reliable"] is True, "official C2 must enable reliable masking flag")
+    require(c2["csl"]["perturb_input"] is True, "official C2 must perturb input")
+    require(c2["csl"]["use_csl_for_cutmix"] is False, "official C2 must not use CSL CutMix")
+    require(not enabled(c2, "boundary_compatibility"), "official C2 must not enable V3")
+    require(not enabled(c2, "saliency_cutmix"), "official C2 must not enable saliency")
 
 
 def test_dry_run(registry: dict) -> None:
@@ -243,6 +290,9 @@ def main() -> int:
     direct_registry = load_registry(DIRECT_REGISTRY)
     test_registry_shape(direct_registry)
     test_direct_config_matrix(direct_registry)
+    cslfix_direct_registry = load_registry(CSLFIX_DIRECT_REGISTRY)
+    test_registry_shape(cslfix_direct_registry)
+    test_cslfix_direct_config_matrix(cslfix_direct_registry)
     print("VOC662 12-method registry smoke tests passed")
     return 0
 
