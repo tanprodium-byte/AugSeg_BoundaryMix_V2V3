@@ -23,6 +23,7 @@ DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods_direct_s
 CSLFIX_DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods_direct_s1s2s3_cslfix_20_40_60_80.yaml"
 S1_RELOCATED_DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_13_methods_direct_s1_relocated_s1s2s3_cslfix_20_40_60_80.yaml"
 S1_ADAPTIVE_RELOCATED_REGISTRY = ROOT / "configs/experiment_registry_voc662_14_methods_s1_relocated_adaptive_s1s2s3_cslfix_20_40_60_80.yaml"
+FINAL_8_SC_OFFICIAL_C3_REGISTRY = ROOT / "configs/experiment_registry_voc662_8_sc_methods_official_c3_20_40_60_80.yaml"
 
 
 def require(condition: bool, message: str) -> None:
@@ -236,6 +237,103 @@ def test_s1_adaptive_relocated_config_matrix(registry: dict) -> None:
     require(not enabled(s1_adaptive, "csl"), "adaptive relocated S1 must not enable CSL")
 
 
+def test_final_8_sc_official_c3_registry(registry: dict) -> None:
+    require(
+        registry["suite_name"] == "voc662_8_sc_methods_official_c3_20_40_60_80",
+        "final 8 S/C suite name mismatch",
+    )
+    expected = {
+        "s1_saliency_box_direct_cutmix",
+        "s1_saliency_box_relocated_cutmix",
+        "s1_saliency_box_adaptive_relocated_cutmix",
+        "s2_saliency_component_mask_direct_cutmix",
+        "s3_saliency_component_mask_direct_plus_v3_d2",
+        "c1_csl_official_reliability_replace_confidence",
+        "c2_csl_official_reliable_mask_perturbation",
+        "c3_csl_official_guided_cutmix_plus_v3_d2",
+    }
+    forbidden = {
+        "c3_csl_guided_cutmix_plus_v3_d2",
+        "v23_d2_no_qc_gate",
+        "v23_d2_soft_qc_gate_a05",
+        "v23_d2_soft_same_target",
+        "v23_d2_hard_qc_gate_a05",
+        "v2_component_weighting",
+        "v3_boundary_compatibility_d2",
+        "v3_d2_affinity_bce",
+        "v3_d2_teacher_feature_gate",
+        "v3_d2_teacher_relation_consistency",
+    }
+    by_name = {m["name"]: m for m in registry["methods"]}
+    require(set(by_name) == expected, f"final 8 registry names mismatch: {sorted(by_name)}")
+    require(not (set(by_name) & forbidden), f"final 8 registry contains forbidden names: {set(by_name) & forbidden}")
+
+    for method in registry["methods"]:
+        require(resolve_path(method["config"]).is_file(), f"missing final 8 config: {method['config']}")
+
+    s1 = cfg(by_name["s1_saliency_box_direct_cutmix"])
+    require(enabled(s1, "saliency_cutmix"), "final S1 direct must enable saliency")
+    require(s1["saliency_cutmix"]["mode"] == "box", "final S1 direct mode mismatch")
+    require(s1["saliency_cutmix"]["direct_labeled_mix"] is True, "final S1 direct must use direct mix")
+    require(not enabled(s1, "csl"), "final S1 direct must not enable CSL")
+
+    s1_relocated = cfg(by_name["s1_saliency_box_relocated_cutmix"])
+    require(enabled(s1_relocated, "saliency_cutmix"), "final S1 relocated must enable saliency")
+    require(s1_relocated["saliency_cutmix"]["mode"] == "box", "final S1 relocated mode mismatch")
+    require(s1_relocated["saliency_cutmix"]["direct_labeled_mix"] is True, "final S1 relocated must use direct mix")
+    require(s1_relocated["saliency_cutmix"]["direct_paste_policy"] == "random_target", "final S1 relocated policy mismatch")
+    require(s1_relocated["saliency_cutmix"].get("direct_confidence_gate", False) is False, "final S1 relocated must remain no-gate")
+    require(not enabled(s1_relocated, "csl"), "final S1 relocated must not enable CSL")
+
+    s1_adaptive = cfg(by_name["s1_saliency_box_adaptive_relocated_cutmix"])
+    require(enabled(s1_adaptive, "saliency_cutmix"), "final S1 adaptive must enable saliency")
+    require(s1_adaptive["saliency_cutmix"]["mode"] == "box", "final S1 adaptive mode mismatch")
+    require(s1_adaptive["saliency_cutmix"]["direct_labeled_mix"] is True, "final S1 adaptive must use direct mix")
+    require(s1_adaptive["saliency_cutmix"]["direct_paste_policy"] == "random_target", "final S1 adaptive policy mismatch")
+    require(s1_adaptive["saliency_cutmix"]["direct_confidence_gate"] is True, "final S1 adaptive must enable gate")
+    require(not enabled(s1_adaptive, "csl"), "final S1 adaptive must not enable CSL")
+
+    s2 = cfg(by_name["s2_saliency_component_mask_direct_cutmix"])
+    require(enabled(s2, "saliency_cutmix"), "final S2 must enable saliency")
+    require(s2["saliency_cutmix"]["mode"] == "component_mask", "final S2 mode mismatch")
+    require(s2["saliency_cutmix"]["direct_labeled_mix"] is True, "final S2 must use direct mix")
+    require(s2["saliency_cutmix"]["paste_mode"] == "mask", "final S2 paste mode mismatch")
+    require(not enabled(s2, "csl"), "final S2 must not enable CSL")
+
+    s3 = cfg(by_name["s3_saliency_component_mask_direct_plus_v3_d2"])
+    require(enabled(s3, "saliency_cutmix"), "final S3 must enable saliency")
+    require(s3["saliency_cutmix"]["mode"] == "component_mask", "final S3 mode mismatch")
+    require(enabled(s3, "boundary_compatibility"), "final S3 must enable BCR")
+    require(int(s3["boundary_compatibility"]["pair_radius"]) == 2, "final S3 pair radius mismatch")
+    require(float(s3["boundary_compatibility"]["lambda_bcr"]) == 0.01, "final S3 lambda mismatch")
+    require(s3["boundary_compatibility"]["use_component_gate"] is False, "final S3 component gate mismatch")
+    require(not enabled(s3, "csl"), "final S3 must not enable CSL")
+
+    c1 = cfg(by_name["c1_csl_official_reliability_replace_confidence"])
+    require(c1["csl"]["reliability_mode"] == "official_pcos", "final C1 must use official_pcos")
+    require(c1["csl"]["use_csl_for_cutmix"] is False, "final C1 must not use CutMix")
+
+    c2 = cfg(by_name["c2_csl_official_reliable_mask_perturbation"])
+    require(c2["csl"]["reliability_mode"] == "official_pcos", "final C2 must use official_pcos")
+    require(c2["csl"]["perturb_input"] is True, "final C2 must perturb input")
+
+    c3 = cfg(by_name["c3_csl_official_guided_cutmix_plus_v3_d2"])
+    require(enabled(c3, "csl"), "final C3 must enable CSL")
+    require(c3["csl"]["mode"] == "official_guided_cutmix", "final C3 mode mismatch")
+    require(c3["csl"]["reliability_mode"] == "official_pcos", "final C3 must use official_pcos")
+    require(c3["csl"]["use_csl_for_cutmix"] is True, "final C3 must use CSL CutMix")
+    require(c3["csl"]["use_csl_for_ce_weight"] is False, "final C3 must not weight CE")
+    require(c3["csl"]["use_csl_for_mix_confidence"] is False, "final C3 must not replace mix confidence")
+    require(enabled(c3, "csl_cutmix"), "final C3 must enable csl_cutmix")
+    require(c3["csl_cutmix"]["target_policy"] == "low_reliability", "final C3 target policy mismatch")
+    require(not enabled(c3, "saliency_cutmix"), "final C3 must not enable saliency")
+    require(enabled(c3, "boundary_compatibility"), "final C3 must enable BCR")
+    require(int(c3["boundary_compatibility"]["pair_radius"]) == 2, "final C3 pair radius mismatch")
+    require(float(c3["boundary_compatibility"]["lambda_bcr"]) == 0.01, "final C3 lambda mismatch")
+    require(c3["boundary_compatibility"]["use_component_gate"] is False, "final C3 component gate mismatch")
+    require("entropy_margin" not in resolve_path(by_name["c3_csl_official_guided_cutmix_plus_v3_d2"]["config"]).read_text(), "final C3 must not use entropy_margin")
+
+
 def test_dry_run(registry: dict) -> None:
     args = parse_args(
         [
@@ -369,6 +467,9 @@ def main() -> int:
     s1_adaptive_relocated_registry = load_registry(S1_ADAPTIVE_RELOCATED_REGISTRY)
     test_registry_shape_with_count(s1_adaptive_relocated_registry, 14)
     test_s1_adaptive_relocated_config_matrix(s1_adaptive_relocated_registry)
+    final_8_sc_official_c3_registry = load_registry(FINAL_8_SC_OFFICIAL_C3_REGISTRY)
+    test_registry_shape_with_count(final_8_sc_official_c3_registry, 8)
+    test_final_8_sc_official_c3_registry(final_8_sc_official_c3_registry)
     print("VOC662 registry smoke tests passed")
     return 0
 

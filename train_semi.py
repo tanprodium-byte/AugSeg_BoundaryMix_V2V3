@@ -1150,6 +1150,16 @@ def train(
     csl_debug_enabled = bool(csl_cfg.get("debug_log", False))
     csl_cutmix_cfg = cfg.get("csl_cutmix", {})
     csl_cutmix_enabled = csl_use_cutmix and bool(csl_cutmix_cfg.get("enabled", False))
+    csl_official_guided_cutmix_enabled = (
+        csl_cutmix_enabled
+        and csl_mode == "official_guided_cutmix"
+        and csl_reliability_mode == "official_pcos"
+    )
+    if csl_mode == "official_guided_cutmix" and not csl_official_guided_cutmix_enabled:
+        raise ValueError(
+            "csl.mode='official_guided_cutmix' requires reliability_mode='official_pcos', "
+            "use_csl_for_cutmix=true, and csl_cutmix.enabled=true"
+        )
     csl_cutmix_debug_enabled = bool(csl_cutmix_cfg.get("debug_log", False))
     model.train()
     
@@ -1396,6 +1406,8 @@ def train(
                             )
                 if csl_cutmix_enabled:
                     try:
+                        if csl_official_guided_cutmix_enabled and csl_reliability_u is None:
+                            raise ValueError("official guided CutMix requires official PCOS reliability map")
                         csl_target_boxes, csl_cutmix_stats = get_csl_guided_boxes(
                             csl_reliability_u,
                             _rand_bbox,
