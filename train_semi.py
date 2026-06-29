@@ -619,6 +619,8 @@ def main(in_args):
     cfg["saliency_cutmix"].setdefault("apply_to", "labeled_source_only")
     cfg["saliency_cutmix"].setdefault("fallback", "random_box")
     cfg["saliency_cutmix"].setdefault("direct_labeled_mix", False)
+    cfg["saliency_cutmix"].setdefault("direct_paste_policy", "same_coordinate")
+    cfg["saliency_cutmix"].setdefault("direct_confidence_gate", False)
     cfg["saliency_cutmix"].setdefault("paste_mode", "box")
     cfg["saliency_cutmix"].setdefault("component_source", "labeled_gt")
     cfg["saliency_cutmix"].setdefault("connectivity", 8)
@@ -1428,6 +1430,8 @@ def train(
                             labeled_boxes=saliency_labeled_boxes,
                             labeled_masks=saliency_labeled_masks,
                             direct_labeled_mix=bool(saliency_cutmix_cfg.get("direct_labeled_mix", False)),
+                            direct_paste_policy=saliency_cutmix_cfg.get("direct_paste_policy", "same_coordinate"),
+                            direct_confidence_gate=bool(saliency_cutmix_cfg.get("direct_confidence_gate", False)),
                             target_boxes=csl_target_boxes,
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:
@@ -1479,6 +1483,8 @@ def train(
                             labeled_boxes=saliency_labeled_boxes,
                             labeled_masks=saliency_labeled_masks,
                             direct_labeled_mix=bool(saliency_cutmix_cfg.get("direct_labeled_mix", False)),
+                            direct_paste_policy=saliency_cutmix_cfg.get("direct_paste_policy", "same_coordinate"),
+                            direct_confidence_gate=bool(saliency_cutmix_cfg.get("direct_confidence_gate", False)),
                             target_boxes=csl_target_boxes,
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:

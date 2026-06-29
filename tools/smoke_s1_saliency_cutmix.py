@@ -189,6 +189,142 @@ def test_direct_box_paste_skips_target_random_second_step():
     assert source_mask.sum().item() == 12
 
 
+def test_direct_box_random_target_relocation():
+    torch.manual_seed(11)
+    np.random.seed(11)
+    batch, height, width = 2, 6, 7
+    unlabeled_image = torch.zeros(batch, 3, height, width)
+    unlabeled_mask = torch.zeros(batch, height, width, dtype=torch.long)
+    unlabeled_logits = torch.zeros(batch, height, width, dtype=torch.float16)
+    unlabeled_probs = torch.ones(batch, 4, height, width)
+    unlabeled_weight = torch.zeros(batch, height, width)
+    labeled_image = torch.arange(batch * 3 * height * width, dtype=torch.float32).view(batch, 3, height, width)
+    labeled_mask = torch.zeros(batch, height, width, dtype=torch.long)
+    labeled_mask[0].fill_(4)
+    labeled_mask[1].fill_(9)
+    confidence = [0.0, 0.0]
+    labeled_boxes = torch.tensor([[0, 0, 1, 1], [1, 2, 4, 6]])
+
+    old_randperm = torch.randperm
+    old_randint = torch.randint
+    randint_values = iter([torch.tensor([0]), torch.tensor([1]), torch.tensor([4]), torch.tensor([0])])
+
+    try:
+        def fixed_randperm(n, *args, **kwargs):
+            return torch.tensor([1, 0], dtype=torch.long)
+
+        def fixed_randint(*args, **kwargs):
+            return next(randint_values).to(kwargs.get("device", torch.device("cpu")))
+
+        torch.randperm = fixed_randperm
+        torch.randint = fixed_randint
+        image, mask, logits, source_mask, probs, weight = cut_mix_label_adaptive_with_mask(
+            unlabeled_image,
+            unlabeled_mask,
+            unlabeled_logits,
+            labeled_image,
+            labeled_mask,
+            confidence,
+            unlabeled_probs=unlabeled_probs,
+            unlabeled_weight=unlabeled_weight,
+            labeled_boxes=labeled_boxes,
+            direct_labeled_mix=True,
+            direct_paste_policy="random_target",
+        )
+    finally:
+        torch.randperm = old_randperm
+        torch.randint = old_randint
+
+    src0_crop = labeled_image[1, :, 1:4, 2:6]
+    assert torch.equal(image[0, :, 0:3, 1:5], src0_crop)
+    assert torch.equal(mask[0, 0:3, 1:5], labeled_mask[1, 1:4, 2:6])
+    assert logits.dtype == torch.float16
+    assert torch.equal(logits[0, 0:3, 1:5], torch.ones((3, 4), dtype=torch.float16))
+    assert torch.equal(weight[0, 0:3, 1:5], torch.ones(3, 4))
+    assert torch.equal(probs[0, :, 0:3, 1:5], torch.zeros(4, 3, 4))
+    assert source_mask[0, 0:3, 1:5].sum().item() == 12
+
+    src1_crop = labeled_image[0, :, 0:1, 0:1]
+    assert torch.equal(image[1, :, 4:5, 0:1], src1_crop)
+    assert torch.equal(mask[1, 4:5, 0:1], labeled_mask[0, 0:1, 0:1])
+    assert torch.equal(logits[1, 4:5, 0:1], torch.ones((1, 1), dtype=torch.float16))
+    assert torch.equal(weight[1, 4:5, 0:1], torch.ones(1, 1))
+    assert torch.equal(probs[1, :, 4:5, 0:1], torch.zeros(4, 1, 1))
+    assert source_mask[1, 4:5, 0:1].sum().item() == 1
+    assert source_mask.sum().item() == 13
+
+
+def test_direct_box_adaptive_relocated_confidence_gate():
+    torch.manual_seed(13)
+    np.random.seed(13)
+    batch, height, width = 2, 6, 7
+    unlabeled_image = torch.zeros(batch, 3, height, width)
+    unlabeled_mask = torch.zeros(batch, height, width, dtype=torch.long)
+    unlabeled_logits = torch.zeros(batch, height, width, dtype=torch.float16)
+    unlabeled_probs = torch.ones(batch, 4, height, width)
+    unlabeled_weight = torch.zeros(batch, height, width)
+    labeled_image = torch.arange(batch * 3 * height * width, dtype=torch.float32).view(batch, 3, height, width)
+    labeled_mask = torch.zeros(batch, height, width, dtype=torch.long)
+    labeled_mask[0].fill_(5)
+    labeled_mask[1].fill_(8)
+    confidence = [1.0, 0.0]
+    labeled_boxes = torch.tensor([[0, 0, 1, 1], [1, 2, 4, 6]])
+
+    old_randperm = torch.randperm
+    old_randint = torch.randint
+    old_random = np.random.random
+    randint_values = iter([torch.tensor([4]), torch.tensor([0])])
+
+    try:
+        def fixed_randperm(n, *args, **kwargs):
+            return torch.tensor([1, 0], dtype=torch.long)
+
+        def fixed_randint(*args, **kwargs):
+            return next(randint_values).to(kwargs.get("device", torch.device("cpu")))
+
+        def fixed_random(*args, **kwargs):
+            return 0.5
+
+        torch.randperm = fixed_randperm
+        torch.randint = fixed_randint
+        np.random.random = fixed_random
+        image, mask, logits, source_mask, probs, weight = cut_mix_label_adaptive_with_mask(
+            unlabeled_image,
+            unlabeled_mask,
+            unlabeled_logits,
+            labeled_image,
+            labeled_mask,
+            confidence,
+            unlabeled_probs=unlabeled_probs,
+            unlabeled_weight=unlabeled_weight,
+            labeled_boxes=labeled_boxes,
+            direct_labeled_mix=True,
+            direct_paste_policy="random_target",
+            direct_confidence_gate=True,
+        )
+    finally:
+        torch.randperm = old_randperm
+        torch.randint = old_randint
+        np.random.random = old_random
+
+    assert torch.equal(image[0], unlabeled_image[0])
+    assert torch.equal(mask[0], unlabeled_mask[0])
+    assert torch.equal(logits[0], unlabeled_logits[0])
+    assert torch.equal(weight[0], unlabeled_weight[0])
+    assert torch.equal(probs[0], unlabeled_probs[0])
+    assert source_mask[0].sum().item() == 0
+
+    src_crop = labeled_image[0, :, 0:1, 0:1]
+    assert torch.equal(image[1, :, 4:5, 0:1], src_crop)
+    assert torch.equal(mask[1, 4:5, 0:1], labeled_mask[0, 0:1, 0:1])
+    assert logits.dtype == torch.float16
+    assert torch.equal(logits[1, 4:5, 0:1], torch.ones((1, 1), dtype=torch.float16))
+    assert torch.equal(weight[1, 4:5, 0:1], torch.ones(1, 1))
+    assert torch.equal(probs[1, :, 4:5, 0:1], torch.zeros(4, 1, 1))
+    assert source_mask[1, 4:5, 0:1].sum().item() == 1
+    assert source_mask.sum().item() == 1
+
+
 def test_numeric_logger_stats():
     _, probs = sample_box_by_softmax(torch.ones(2, 3), temperature=0.2)
     assert torch.isfinite(probs).all()
@@ -205,6 +341,8 @@ def main():
     test_box_coordinate_convention_matches_boundary_mix()
     test_random_fallback_wrapper_path()
     test_direct_box_paste_skips_target_random_second_step()
+    test_direct_box_random_target_relocation()
+    test_direct_box_adaptive_relocated_confidence_gate()
     test_numeric_logger_stats()
     print("S1 saliency CutMix smoke tests passed")
 

@@ -174,6 +174,8 @@ def cut_mix_label_adaptive_with_mask(
     labeled_boxes=None,
     labeled_masks=None,
     direct_labeled_mix=False,
+    direct_paste_policy="same_coordinate",
+    direct_confidence_gate=False,
     target_boxes=None,
 ):
     assert len(lst_confidences) == len(unlabeled_image), "Ensure the confidence is properly obtained"
@@ -195,6 +197,8 @@ def cut_mix_label_adaptive_with_mask(
 
     if labeled_boxes is not None and labeled_masks is not None:
         raise ValueError("labeled_boxes and labeled_masks cannot both be provided")
+    if direct_paste_policy not in ("same_coordinate", "random_target"):
+        raise ValueError(f"Unsupported direct_paste_policy: {direct_paste_policy}")
 
     def _return_with_optional_metadata():
         if return_target_metadata:
@@ -250,29 +254,48 @@ def cut_mix_label_adaptive_with_mask(
         labeled_boxes = torch.as_tensor(labeled_boxes, device=unlabeled_image.device, dtype=torch.long)
         if labeled_boxes.shape != (unlabeled_image.size(0), 4):
             raise ValueError("labeled_boxes must have shape [B,4]")
-        shuffled_boxes = labeled_boxes[u_rand_index]
         batch, height, width = unlabeled_mask.shape
 
         for i in range(batch):
+            if direct_confidence_gate and np.random.random() <= lst_confidences[i]:
+                continue
             src = int(u_rand_index[i].item())
-            x1, y1, x2, y2 = shuffled_boxes[i].tolist()
-            x1 = max(0, min(int(x1), height))
-            x2 = max(0, min(int(x2), height))
-            y1 = max(0, min(int(y1), width))
-            y2 = max(0, min(int(y2), width))
-            if x2 <= x1 or y2 <= y1:
+            src_h1, src_w1, src_h2, src_w2 = labeled_boxes[src].tolist()
+            src_h1 = max(0, min(int(src_h1), height))
+            src_h2 = max(0, min(int(src_h2), height))
+            src_w1 = max(0, min(int(src_w1), width))
+            src_w2 = max(0, min(int(src_w2), width))
+            if src_h2 <= src_h1 or src_w2 <= src_w1:
                 continue
 
-            mix_unlabeled_image[i, :, x1:x2, y1:y2] = labeled_image[src, :, x1:x2, y1:y2]
-            mix_unlabeled_target[i, x1:x2, y1:y2] = labeled_mask[src, x1:x2, y1:y2]
-            mix_unlabeled_logits[i, x1:x2, y1:y2] = labeled_logits[src, x1:x2, y1:y2].to(
+            crop_h = src_h2 - src_h1
+            crop_w = src_w2 - src_w1
+            if direct_paste_policy == "random_target":
+                max_h = height - crop_h
+                max_w = width - crop_w
+                dst_h1 = int(torch.randint(0, max_h + 1, (1,), device=unlabeled_image.device).item())
+                dst_w1 = int(torch.randint(0, max_w + 1, (1,), device=unlabeled_image.device).item())
+                dst_h2 = dst_h1 + crop_h
+                dst_w2 = dst_w1 + crop_w
+            else:
+                dst_h1, dst_w1, dst_h2, dst_w2 = src_h1, src_w1, src_h2, src_w2
+
+            mix_unlabeled_image[i, :, dst_h1:dst_h2, dst_w1:dst_w2] = labeled_image[
+                src, :, src_h1:src_h2, src_w1:src_w2
+            ]
+            mix_unlabeled_target[i, dst_h1:dst_h2, dst_w1:dst_w2] = labeled_mask[
+                src, src_h1:src_h2, src_w1:src_w2
+            ]
+            mix_unlabeled_logits[i, dst_h1:dst_h2, dst_w1:dst_w2] = labeled_logits[
+                src, src_h1:src_h2, src_w1:src_w2
+            ].to(
                 dtype=mix_unlabeled_logits.dtype
             )
             if mix_unlabeled_probs is not None:
-                mix_unlabeled_probs[i, :, x1:x2, y1:y2] = 0.0
+                mix_unlabeled_probs[i, :, dst_h1:dst_h2, dst_w1:dst_w2] = 0.0
             if mix_unlabeled_weight is not None:
-                mix_unlabeled_weight[i, x1:x2, y1:y2] = 1.0
-            mix_source_mask[i, x1:x2, y1:y2] = 1.0
+                mix_unlabeled_weight[i, dst_h1:dst_h2, dst_w1:dst_w2] = 1.0
+            mix_source_mask[i, dst_h1:dst_h2, dst_w1:dst_w2] = 1.0
 
         return _return_with_optional_metadata()
 

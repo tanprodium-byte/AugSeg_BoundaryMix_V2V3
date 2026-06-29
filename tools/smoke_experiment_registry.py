@@ -21,6 +21,8 @@ from tools.run_experiment_suite import (  # noqa: E402
 REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods.yaml"
 DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods_direct_s1s2s3_20_40_60_80.yaml"
 CSLFIX_DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_12_methods_direct_s1s2s3_cslfix_20_40_60_80.yaml"
+S1_RELOCATED_DIRECT_REGISTRY = ROOT / "configs/experiment_registry_voc662_13_methods_direct_s1_relocated_s1s2s3_cslfix_20_40_60_80.yaml"
+S1_ADAPTIVE_RELOCATED_REGISTRY = ROOT / "configs/experiment_registry_voc662_14_methods_s1_relocated_adaptive_s1s2s3_cslfix_20_40_60_80.yaml"
 
 
 def require(condition: bool, message: str) -> None:
@@ -39,9 +41,13 @@ def enabled(config: dict, section: str) -> bool:
 
 
 def test_registry_shape(registry: dict) -> None:
+    test_registry_shape_with_count(registry, 12)
+
+
+def test_registry_shape_with_count(registry: dict, expected_count: int) -> None:
     methods = registry["methods"]
     names = [m["name"] for m in methods]
-    require(len(methods) == 12, f"expected 12 methods, got {len(methods)}")
+    require(len(methods) == expected_count, f"expected {expected_count} methods, got {len(methods)}")
     require(len(names) == len(set(names)), "method names must be unique")
     for method in methods:
         require(resolve_path(method["config"]).is_file(), f"missing config: {method['config']}")
@@ -164,6 +170,70 @@ def test_cslfix_direct_config_matrix(registry: dict) -> None:
     require(c2["csl"]["use_csl_for_cutmix"] is False, "official C2 must not use CSL CutMix")
     require(not enabled(c2, "boundary_compatibility"), "official C2 must not enable V3")
     require(not enabled(c2, "saliency_cutmix"), "official C2 must not enable saliency")
+
+
+def test_s1_relocated_direct_config_matrix(registry: dict) -> None:
+    require(
+        registry["suite_name"] == "voc662_13_methods_direct_s1_relocated_s1s2s3_cslfix_20_40_60_80",
+        "s1 relocated direct suite name mismatch",
+    )
+    by_name = {m["name"]: m for m in registry["methods"]}
+    require("s1_saliency_box_relocated_cutmix" in by_name, "s1 relocated suite missing relocated S1")
+    require("c1_csl_official_reliability_replace_confidence" in by_name, "s1 relocated suite missing official C1")
+    require("c2_csl_official_reliable_mask_perturbation" in by_name, "s1 relocated suite missing official C2")
+
+    s1_relocated = cfg(by_name["s1_saliency_box_relocated_cutmix"])
+    require(enabled(s1_relocated, "saliency_cutmix"), "relocated S1 must enable saliency_cutmix")
+    require(s1_relocated["saliency_cutmix"]["mode"] == "box", "relocated S1 must use box mode")
+    require(s1_relocated["saliency_cutmix"]["direct_labeled_mix"] is True, "relocated S1 must enable direct_labeled_mix")
+    require(
+        s1_relocated["saliency_cutmix"]["direct_paste_policy"] == "random_target",
+        "relocated S1 must use random_target direct paste policy",
+    )
+    require(not enabled(s1_relocated, "boundary_compatibility"), "relocated S1 must not enable V3")
+    require(not enabled(s1_relocated, "boundary_component"), "relocated S1 must not enable V2")
+    require(not enabled(s1_relocated, "csl"), "relocated S1 must not enable CSL")
+
+
+def test_s1_adaptive_relocated_config_matrix(registry: dict) -> None:
+    require(
+        registry["suite_name"] == "voc662_14_methods_s1_relocated_adaptive_s1s2s3_cslfix_20_40_60_80",
+        "s1 adaptive relocated suite name mismatch",
+    )
+    by_name = {m["name"]: m for m in registry["methods"]}
+    for required_name in (
+        "s1_saliency_box_direct_cutmix",
+        "s1_saliency_box_relocated_cutmix",
+        "s1_saliency_box_adaptive_relocated_cutmix",
+        "s2_saliency_component_mask_direct_cutmix",
+        "s3_saliency_component_mask_direct_plus_v3_d2",
+        "c1_csl_official_reliability_replace_confidence",
+        "c2_csl_official_reliable_mask_perturbation",
+        "c3_csl_guided_cutmix_plus_v3_d2",
+    ):
+        require(required_name in by_name, f"14-method suite missing {required_name}")
+
+    s1_relocated = cfg(by_name["s1_saliency_box_relocated_cutmix"])
+    require(
+        s1_relocated["saliency_cutmix"].get("direct_confidence_gate", False) is False,
+        "relocated S1 must remain no-gate",
+    )
+
+    s1_adaptive = cfg(by_name["s1_saliency_box_adaptive_relocated_cutmix"])
+    require(enabled(s1_adaptive, "saliency_cutmix"), "adaptive relocated S1 must enable saliency_cutmix")
+    require(s1_adaptive["saliency_cutmix"]["mode"] == "box", "adaptive relocated S1 must use box mode")
+    require(s1_adaptive["saliency_cutmix"]["direct_labeled_mix"] is True, "adaptive relocated S1 must enable direct_labeled_mix")
+    require(
+        s1_adaptive["saliency_cutmix"]["direct_paste_policy"] == "random_target",
+        "adaptive relocated S1 must use random_target direct paste policy",
+    )
+    require(
+        s1_adaptive["saliency_cutmix"]["direct_confidence_gate"] is True,
+        "adaptive relocated S1 must enable direct confidence gate",
+    )
+    require(not enabled(s1_adaptive, "boundary_compatibility"), "adaptive relocated S1 must not enable V3")
+    require(not enabled(s1_adaptive, "boundary_component"), "adaptive relocated S1 must not enable V2")
+    require(not enabled(s1_adaptive, "csl"), "adaptive relocated S1 must not enable CSL")
 
 
 def test_dry_run(registry: dict) -> None:
@@ -293,7 +363,13 @@ def main() -> int:
     cslfix_direct_registry = load_registry(CSLFIX_DIRECT_REGISTRY)
     test_registry_shape(cslfix_direct_registry)
     test_cslfix_direct_config_matrix(cslfix_direct_registry)
-    print("VOC662 12-method registry smoke tests passed")
+    s1_relocated_direct_registry = load_registry(S1_RELOCATED_DIRECT_REGISTRY)
+    test_registry_shape_with_count(s1_relocated_direct_registry, 13)
+    test_s1_relocated_direct_config_matrix(s1_relocated_direct_registry)
+    s1_adaptive_relocated_registry = load_registry(S1_ADAPTIVE_RELOCATED_REGISTRY)
+    test_registry_shape_with_count(s1_adaptive_relocated_registry, 14)
+    test_s1_adaptive_relocated_config_matrix(s1_adaptive_relocated_registry)
+    print("VOC662 registry smoke tests passed")
     return 0
 
 
