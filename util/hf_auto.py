@@ -48,9 +48,26 @@ def _default_bundle_name(save_path: str | Path) -> str:
 
 def _default_path_in_repo(hf_cfg: Dict[str, Any], save_path: str | Path) -> str:
     bundle_name = hf_cfg.get("bundle_name") or _default_bundle_name(save_path)
-    if bool(hf_cfg.get("keep_only_latest", True)):
-        return hf_cfg.get("path_in_repo") or bundle_name
-    return hf_cfg.get("path_in_repo") or bundle_name
+    path_in_repo = str(hf_cfg.get("path_in_repo") or "").strip().strip("/")
+
+    if not path_in_repo:
+        return bundle_name
+
+    last_part = path_in_repo.rsplit("/", 1)[-1]
+
+    # Nếu path_in_repo đã là filename, ví dụ:
+    #   suite/method/latest.tar.gz
+    # hoặc:
+    #   suite/method/ckpt_epoch_020.tar.gz
+    # thì giữ nguyên.
+    if "." in last_part:
+        return path_in_repo
+
+    # Nếu path_in_repo là folder, ví dụ:
+    #   suite/method
+    # thì upload/download bundle tại:
+    #   suite/method/latest.tar.gz
+    return f"{path_in_repo}/{bundle_name}"
 
 
 def _add_if_exists(tar: tarfile.TarFile, path: Path, arcname: Optional[str] = None) -> None:

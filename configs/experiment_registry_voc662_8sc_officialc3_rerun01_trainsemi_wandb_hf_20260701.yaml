@@ -1,0 +1,57 @@
+suite_name: voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701
+dataset: pascal_voc
+n_sup: 662
+crop_size:
+- 321
+- 321
+global_batch_size: 8
+default_gpu: 0
+default_nproc_per_node: 1
+default_master_port: 29531
+methods:
+- name: s1_saliency_box_direct_cutmix
+  group: saliency_direct
+  config: exps/boundary_mix_v2_v3/voc_semi662_reruns/voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701/s1_saliency_box_direct_cutmix/config.yaml
+- name: s1_saliency_box_relocated_cutmix
+  group: saliency_cutmix
+  config: exps/boundary_mix_v2_v3/voc_semi662_reruns/voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701/s1_saliency_box_relocated_cutmix/config.yaml
+- name: s1_saliency_box_adaptive_relocated_cutmix
+  group: saliency_cutmix
+  config: exps/boundary_mix_v2_v3/voc_semi662_reruns/voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701/s1_saliency_box_adaptive_relocated_cutmix/config.yaml
+- name: s2_saliency_component_mask_direct_cutmix
+  group: saliency_direct
+  config: exps/boundary_mix_v2_v3/voc_semi662_reruns/voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701/s2_saliency_component_mask_direct_cutmix/config.yaml
+- name: s3_saliency_component_mask_direct_plus_v3_d2
+  group: saliency_direct_v3
+  config: exps/boundary_mix_v2_v3/voc_semi662_reruns/voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701/s3_saliency_component_mask_direct_plus_v3_d2/config.yaml
+- name: c1_csl_official_reliability_replace_confidence
+  group: csl
+  config: exps/boundary_mix_v2_v3/voc_semi662_reruns/voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701/c1_csl_official_reliability_replace_confidence/config.yaml
+  display_name: c1_official_reliability_replace_confidence
+  description: Official CSL PCOS-style reliability replaces pixel CE confidence and
+    adaptive CutMix sample confidence.
+  tags:
+  - csl_official_like
+  - official_pcos
+  - reliability_weight
+- name: c2_csl_official_reliable_mask_perturbation
+  group: csl
+  config: exps/boundary_mix_v2_v3/voc_semi662_reruns/voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701/c2_csl_official_reliable_mask_perturbation/config.yaml
+  display_name: c2_official_reliable_mask_perturbation
+  description: Official CSL PCOS-style reliability with reliable input perturbation
+    before student forward.
+  tags:
+  - csl_official_like
+  - official_pcos
+  - input_perturbation
+- name: c3_csl_official_guided_cutmix_plus_v3_d2
+  group: csl_v3
+  config: exps/boundary_mix_v2_v3/voc_semi662_reruns/voc662_8sc_officialc3_rerun01_trainsemi_wandb_hf_20260701/c3_csl_official_guided_cutmix_plus_v3_d2/config.yaml
+  display_name: c3_official_guided_cutmix_plus_v3_d2
+  description: Official CSL PCOS-style reliability chooses low-reliability CutMix
+    target boxes with V3-d2 BCR.
+  tags:
+  - csl_official_like
+  - official_pcos
+  - guided_cutmix
+  - v3_d2

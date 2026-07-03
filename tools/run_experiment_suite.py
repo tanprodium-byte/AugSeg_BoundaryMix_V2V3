@@ -316,6 +316,12 @@ def make_segment_config(src: Path, method_name: str, timestamp: str, target_epoc
         raise ValueError(
             f"segment target_epoch={target_epoch} exceeds original trainer.epochs={original_epochs} for {method_name}"
         )
+
+    saver_cfg = segment_cfg.setdefault("saver", {})
+    snapshot_dir = saver_cfg.get("snapshot_dir")
+    if snapshot_dir and not Path(str(snapshot_dir)).is_absolute():
+        saver_cfg["snapshot_dir"] = str((src.parent / str(snapshot_dir)).resolve())
+
     segment_cfg.setdefault("trainer", {})["epochs"] = int(target_epoch)
     out_dir = SEGMENT_CONFIG_ROOT / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -660,8 +666,9 @@ class WandbSegmentLogger:
 
 
 def wandb_enabled(args: argparse.Namespace) -> bool:
-    return bool(args.wandb_enable or env_flag("AUGSEG_WANDB_ENABLE"))
-
+    # Runner chỉ điều phối suite/segment.
+    # W&B chỉ được quản lý trong train_semi.py để tránh tạo run trùng/lộn checkpoint.
+    return False
 
 def sanitize_wandb_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")

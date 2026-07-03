@@ -348,6 +348,15 @@ def _safe_path_token(value):
     token = re.sub(r"[^A-Za-z0-9]+", "_", str(value).strip().lower())
     return token.strip("_") or "unknown"
 
+def _sanitize_wandb_id(value):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip()).strip("_")
+
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(x).strip() for x in value if str(x).strip()]
+    return [x.strip() for x in str(value).split(",") if x.strip()]
 
 def _get_backbone_token(cfg):
     encoder_type = cfg.get("net", {}).get("encoder", {}).get("type", "")
@@ -538,7 +547,17 @@ def main(in_args):
     flag_use_tb = cfg["saver"]["use_tb"]
 
     cfg.setdefault("run", {})
+    cfg["run"].setdefault("suite_id", "")
     cfg["run"].setdefault("name", os.path.basename(os.path.normpath(cfg["save_path"])) or "run")
+
+    cfg.setdefault("wandb", {})
+    cfg["wandb"].setdefault("enable", False)
+    cfg["wandb"].setdefault("project", "augseg-voc662")
+    cfg["wandb"].setdefault("entity", None)
+    cfg["wandb"].setdefault("group", cfg["run"].get("suite_id") or None)
+    cfg["wandb"].setdefault("name", cfg["run"].get("name") or None)
+    cfg["wandb"].setdefault("resume", "allow")
+    cfg["wandb"].setdefault("tags", [])
     cfg["run"].setdefault("log_every", cfg.get("wandb", {}).get("log_every", 50))
 
     cfg.setdefault("checkpoint", {})
@@ -697,7 +716,15 @@ def main(in_args):
         logger, curr_timestr = None, ""
 
     if rank == 0:
-        run_id = get_or_create_run_id(cfg["save_path"], cfg["run"]["name"])
+        suite_id = str(cfg.get("run", {}).get("suite_id", "") or "").strip()
+        run_name = str(cfg.get("run", {}).get("name", "") or "").strip()
+
+        if suite_id and run_name:
+            run_id = _sanitize_wandb_id(f"{suite_id}__{run_name}")
+            with open(os.path.join(cfg["save_path"], "run_id.txt"), "w", encoding="utf-8") as f:
+                f.write(str(run_id) + "\n")
+        else:
+            run_id = get_or_create_run_id(cfg["save_path"], run_name or "run")
     else:
         run_id = ""
 
@@ -735,10 +762,27 @@ def main(in_args):
             os.environ["WANDB_MODE"] = "disabled"
         else:
             import wandb
+
+            suite_id = str(cfg.get("run", {}).get("suite_id", "") or "").strip()
+            run_name = str(cfg.get("run", {}).get("name", "") or "").strip()
+            wandb_cfg = cfg.get("wandb", {}) or {}
+
+            wandb_group = wandb_cfg.get("group") or suite_id or None
+            wandb_name = wandb_cfg.get("name") or run_name or run_id
+            wandb_resume = wandb_cfg.get("resume", "allow")
+            wandb_tags = _as_list(wandb_cfg.get("tags"))
+
+            if suite_id and suite_id not in wandb_tags:
+                wandb_tags.append(suite_id)
+
             wandb_run = wandb.init(
-                project=cfg.get("wandb", {}).get("project", "AugsegResearch"),
-                entity=cfg.get("wandb", {}).get("entity", None),
-                name=cfg.get("wandb", {}).get("name", run_id),
+                project=wandb_cfg.get("project", "augseg-voc662"),
+                entity=wandb_cfg.get("entity", None),
+                group=wandb_group,
+                name=wandb_name,
+                id=run_id,
+                resume=wandb_resume,
+                tags=wandb_tags,
                 config=cfg,
                 dir=cfg["log_path"],
                 settings=wandb.Settings(start_method="thread"),
@@ -1115,7 +1159,10 @@ def train(
     local_rank = torch.cuda.current_device()
     ema_decay_origin = cfg["net"]["ema_decay"]
     rank, world_size = dist.get_rank(), dist.get_world_size()
-    log_every = int(cfg.get("wandb", {}).get("log_every", 50))
+    log_every_value = cfg.get("run", {}).get("log_every", None)
+    if log_every_value is None:
+        log_every_value = cfg.get("wandb", {}).get("log_every", 50)
+    log_every = max(1, int(log_every_value))
     flag_extra_weak = cfg["trainer"]["unsupervised"].get("flag_extra_weak", False)
     boundary_mix_cfg = cfg.get("boundary_mix", {})
     boundary_mix_enabled = bool(boundary_mix_cfg.get("enabled", False))
