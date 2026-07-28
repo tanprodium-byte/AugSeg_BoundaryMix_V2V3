@@ -60,8 +60,15 @@ def make_inputs():
                 labeled_target[donor, y, x] = 10 * (donor + 1) + y
     labeled_target[1, 2, 2] = 255
 
-    boxes = torch.tensor([[1, 1, 4, 4], [2, 0, 6, 2]], dtype=torch.long)
-    unlabeled_target[0, 1:4, 1:4] = labeled_target[1, 1:4, 1:4]
+    # Box contract: [row1, col1, row2, col2]
+    boxes = torch.tensor(
+        [
+            [1, 2, 4, 5],
+            [0, 2, 2, 6],
+        ],
+        dtype=torch.long,
+    )
+    unlabeled_target[0, 1:4, 2:5] = labeled_target[1, 1:4, 2:5]
     return (
         unlabeled_image,
         unlabeled_target,
@@ -159,18 +166,18 @@ def test_gate_pairing_geometry_and_provenance():
     require(source_mask.shape == u_target.shape and source_mask.dtype == torch.float32, "source-mask contract")
     require(weight.shape == u_weight.shape and weight.dtype == u_weight.dtype, "weight contract")
 
-    x1, y1, x2, y2 = boxes[0].tolist()
+    row1, col1, row2, col2 = boxes[0].tolist()
     require(
-        torch.equal(image[0, :, y1:y2, x1:x2], labeled_image[1, :, y1:y2, x1:x2]),
+        torch.equal(image[0, :, row1:row2, col1:col2], labeled_image[1, :, row1:row2, col1:col2]),
         "target 0 must receive same-coordinate RGB from donor 1",
     )
     require(
-        torch.equal(target[0, y1:y2, x1:x2], labeled_target[1, y1:y2, x1:x2]),
+        torch.equal(target[0, row1:row2, col1:col2], labeled_target[1, row1:row2, col1:col2]),
         "RGB and GT must use the same labeled donor and coordinates",
     )
-    require(source_mask[0, y1:y2, x1:x2].eq(1).all(), "successful rectangle must be labeled provenance")
+    require(source_mask[0, row1:row2, col1:col2].eq(1).all(), "successful rectangle must be labeled provenance")
     outside = torch.ones_like(source_mask[0], dtype=torch.bool)
-    outside[y1:y2, x1:x2] = False
+    outside[row1:row2, col1:col2] = False
     require(torch.equal(image[0, :, outside], u_image[0, :, outside]), "outside image must remain final target 0")
     require(torch.equal(target[0, outside], u_target[0, outside]), "outside pseudo-label must remain final target 0")
     require(torch.equal(weight[0, outside], u_weight[0, outside]), "outside CSL weight must remain final target 0")
@@ -182,13 +189,13 @@ def test_gate_pairing_geometry_and_provenance():
     require(torch.equal(weight[1], u_weight[1]), "gate-fail CSL weight must remain unchanged")
     require(source_mask[1].eq(0).all(), "gate-fail provenance must be all zero")
 
-    valid = target[0, y1:y2, x1:x2].ne(255)
-    pasted_weight = weight[0, y1:y2, x1:x2]
+    valid = target[0, row1:row2, col1:col2].ne(255)
+    pasted_weight = weight[0, row1:row2, col1:col2]
     require(pasted_weight[valid].eq(1).all(), "valid labeled pixels must receive exact weight one")
     require(pasted_weight[~valid].eq(0).all(), "labeled ignore pixels must store zero weight")
     require(target[0, 2, 2].item() == 255, "labeled ignore target must remain 255")
     require(
-        torch.equal(target[0, y1:y2, x1:x2], originals[1][0, y1:y2, x1:x2]),
+        torch.equal(target[0, row1:row2, col1:col2], originals[1][0, row1:row2, col1:col2]),
         "fixture must prove pasted labels can equal the previous pseudo-labels",
     )
 
@@ -364,6 +371,18 @@ def test_config_and_isolated_dispatch():
     exact_guard = 'csl_mode == "official_direct_labeled_guided_cutmix_plus_ce_weight"'
     require(exact_guard in source, "C4 dispatch must be guarded by the exact opt-in mode")
     require("if csl_c4_direct_labeled_enabled:" in source, "missing isolated C4 dispatch")
+    require(
+        "c4_target_boxes = csl_target_boxes[:, [1, 0, 3, 2]]"
+        not in source,
+        "C4 must not transpose row/col boxes",
+    )
+    require(
+        any(
+            line.strip() == "c4_target_boxes = csl_target_boxes"
+            for line in source.splitlines()
+        ),
+        "C4 must pass row/col boxes directly",
+    )
     require(
         source.index("if ar_applied:") < source.index("if csl_c4_direct_labeled_enabled:", source.index("if ar_applied:")),
         "C4 RNG dispatch must remain inside the existing outer trigger",

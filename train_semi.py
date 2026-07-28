@@ -1523,9 +1523,8 @@ def train(
                     or csl_cutmix_enabled
                 ):
                     if csl_c4_direct_labeled_enabled:
-                        # get_csl_guided_boxes uses repository [row1,col1,row2,col2]
-                        # coordinates; the isolated C4 helper consumes [x1,y1,x2,y2].
-                        c4_target_boxes = csl_target_boxes[:, [1, 0, 3, 2]]
+                        # C4 uses [row1, col1, row2, col2] coordinates end-to-end.
+                        c4_target_boxes = csl_target_boxes
                         (
                             image_u_aug,
                             label_u_aug,

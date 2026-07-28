@@ -179,9 +179,9 @@ def compute_c4_direct_mix_stats(
     pasted_pixel_count = pasted_mask.sum()
 
     boxes = target_boxes.detach()
-    box_width = (boxes[:, 2] - boxes[:, 0]).clamp_min(0)
-    box_height = (boxes[:, 3] - boxes[:, 1]).clamp_min(0)
-    box_area = box_width * box_height
+    box_height = (boxes[:, 2] - boxes[:, 0]).clamp_min(0)
+    box_width = (boxes[:, 3] - boxes[:, 1]).clamp_min(0)
+    box_area = box_height * box_width
 
     valid_pasted_mask = pasted_mask & detached_target.ne(ignore_index)
     ignore_pasted_mask = pasted_mask & detached_target.eq(ignore_index)
@@ -286,23 +286,41 @@ def cut_mix_label_adaptive_c4_direct_labeled(
         if np.random.random() <= reliability_i:
             continue
 
-        x1, y1, x2, y2 = (int(value) for value in target_boxes[i].tolist())
-        if not (0 <= x1 < x2 <= target_width and 0 <= y1 < y2 <= target_height):
+        row1, col1, row2, col2 = (
+            int(value) for value in target_boxes[i].tolist()
+        )
+
+        if not (
+            0 <= row1 < row2 <= target_height
+            and 0 <= col1 < col2 <= target_width
+        ):
             raise ValueError(
-                f"C4 invalid target box for target {i}: [x1={x1}, y1={y1}, x2={x2}, y2={y2}] "
-                f"outside width={target_width}, height={target_height}"
+                f"C4 invalid target box for target {i}: "
+                f"[row1={row1}, col1={col1}, row2={row2}, col2={col2}] "
+                f"outside height={target_height}, width={target_width}"
             )
-        if x2 > source_width or y2 > source_height:
+
+        if row2 > source_height or col2 > source_width:
             raise ValueError(
                 f"C4 target box for target {i} exceeds labeled source geometry "
-                f"width={source_width}, height={source_height}"
+                f"height={source_height}, width={source_width}"
             )
 
         donor_i = int(donor_perm[i].item())
-        source_image = labeled_image[donor_i, :, y1:y2, x1:x2]
-        source_gt = labeled_mask[donor_i, y1:y2, x1:x2]
-        destination_image = mixed_image[i, :, y1:y2, x1:x2]
-        destination_target = mixed_target[i, y1:y2, x1:x2]
+
+        source_image = labeled_image[
+            donor_i, :, row1:row2, col1:col2
+        ]
+        source_gt = labeled_mask[
+            donor_i, row1:row2, col1:col2
+        ]
+
+        destination_image = mixed_image[
+            i, :, row1:row2, col1:col2
+        ]
+        destination_target = mixed_target[
+            i, row1:row2, col1:col2
+        ]
         if source_image.shape != destination_image.shape:
             raise ValueError(
                 f"C4 image crop shape mismatch for target {i}, donor {donor_i}: "
@@ -314,14 +332,32 @@ def cut_mix_label_adaptive_c4_direct_labeled(
                 f"source={tuple(source_gt.shape)}, destination={tuple(destination_target.shape)}"
             )
 
-        mixed_image[i, :, y1:y2, x1:x2] = source_image
-        mixed_target[i, y1:y2, x1:x2] = source_gt
-        mixed_logits[i, y1:y2, x1:x2] = 1.0
+        mixed_image[
+            i, :, row1:row2, col1:col2
+        ] = source_image
+
+        mixed_target[
+            i, row1:row2, col1:col2
+        ] = source_gt
+
+        mixed_logits[
+            i, row1:row2, col1:col2
+        ] = 1.0
+
         if mixed_probs is not None:
-            mixed_probs[i, :, y1:y2, x1:x2] = 0.0
+            mixed_probs[
+                i, :, row1:row2, col1:col2
+            ] = 0.0
+
         valid_labeled = source_gt.ne(ignore_index)
-        mixed_weight[i, y1:y2, x1:x2] = valid_labeled.to(dtype=mixed_weight.dtype)
-        mix_source_mask[i, y1:y2, x1:x2] = 1.0
+
+        mixed_weight[
+            i, row1:row2, col1:col2
+        ] = valid_labeled.to(dtype=mixed_weight.dtype)
+
+        mix_source_mask[
+            i, row1:row2, col1:col2
+        ] = 1.0
 
     if mixed_probs is not None:
         return mixed_image, mixed_target, mixed_logits, mix_source_mask, mixed_probs, mixed_weight
