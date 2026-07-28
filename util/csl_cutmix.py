@@ -50,6 +50,8 @@ def get_csl_guided_boxes(
     num_candidates=8,
     temperature=0.2,
     policy="low_reliability",
+    *,
+    strict=False,
 ):
     """
     reliability: [B,H,W], CSL reliability on target unlabeled.
@@ -76,9 +78,27 @@ def get_csl_guided_boxes(
             selected_idx, probs = sample_box_by_softmax(scores, temperature=float(temperature))
             batch_index = torch.arange(reliability.size(0), device=reliability.device)
             selected_boxes = boxes[batch_index, selected_idx].detach()
+            if strict:
+                height, width = reliability.shape[1:]
+                valid = (
+                    (selected_boxes[:, 0] >= 0)
+                    & (selected_boxes[:, 0] < selected_boxes[:, 2])
+                    & (selected_boxes[:, 2] <= height)
+                    & (selected_boxes[:, 1] >= 0)
+                    & (selected_boxes[:, 1] < selected_boxes[:, 3])
+                    & (selected_boxes[:, 3] <= width)
+                )
+                if not bool(valid.all()):
+                    bad = torch.nonzero(~valid, as_tuple=False).flatten().tolist()
+                    raise ValueError(f"invalid selected CSL boxes for batch indices {bad}")
             stats = _stats_from_csl_scores(scores, selected_idx, probs, reliability, boxes, fallback_ratio=0.0)
             return selected_boxes, stats
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(
+                    f"strict CSL guided box selection failed for batch_size={reliability.size(0)} "
+                    f"and spatial_shape={tuple(reliability.shape[1:])}"
+                ) from exc
             selected_boxes = _fallback_boxes(reliability, base_box_sampler).detach()
             scores = torch.zeros((reliability.size(0), 1), device=reliability.device)
             probs = torch.ones_like(scores)

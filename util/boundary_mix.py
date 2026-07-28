@@ -161,6 +161,173 @@ def weighted_cross_entropy_loss(
     return (ce * weight).sum() / (weight.sum() + eps)
 
 
+def compute_c4_direct_mix_stats(
+    mix_source_mask: torch.Tensor,
+    mixed_target: torch.Tensor,
+    target_boxes: torch.Tensor,
+    *,
+    ignore_index: int = 255,
+) -> dict[str, float]:
+    """Compute C4 instrumentation from provenance without mutation or RNG."""
+    pasted_mask = mix_source_mask.detach().bool()
+    detached_target = mixed_target.detach()
+    batch, height, width = pasted_mask.shape
+
+    gate_attempted_count = batch
+    mixed_sample_mask = pasted_mask.flatten(1).any(dim=1)
+    gate_pass_count = mixed_sample_mask.sum()
+    pasted_pixel_count = pasted_mask.sum()
+
+    boxes = target_boxes.detach()
+    box_width = (boxes[:, 2] - boxes[:, 0]).clamp_min(0)
+    box_height = (boxes[:, 3] - boxes[:, 1]).clamp_min(0)
+    box_area = box_width * box_height
+
+    valid_pasted_mask = pasted_mask & detached_target.ne(ignore_index)
+    ignore_pasted_mask = pasted_mask & detached_target.eq(ignore_index)
+    valid_count = valid_pasted_mask.sum()
+    ignore_count = ignore_pasted_mask.sum()
+
+    gate_attempted = float(gate_attempted_count)
+    gate_pass = float(gate_pass_count.item())
+    pasted_pixels = float(pasted_pixel_count.item())
+    if pasted_pixels > 0:
+        valid_ratio = float(valid_count.item()) / pasted_pixels
+        ignore_ratio = float(ignore_count.item()) / pasted_pixels
+    else:
+        valid_ratio = 0.0
+        ignore_ratio = 0.0
+
+    selected_box_area_mean = float(box_area.float().mean().item())
+    return {
+        "c4/gate_attempted_count": gate_attempted,
+        "c4/gate_pass_count": gate_pass,
+        "c4/gate_pass_ratio": gate_pass / gate_attempted,
+        "c4/mixed_sample_count": gate_pass,
+        "c4/mixed_sample_ratio": gate_pass / gate_attempted,
+        "c4/pasted_pixel_count": pasted_pixels,
+        "c4/pasted_pixel_ratio": pasted_pixels / float(batch * height * width),
+        "c4/selected_box_area_mean": selected_box_area_mean,
+        "c4/selected_box_area_ratio_mean": selected_box_area_mean / float(height * width),
+        "c4/valid_labeled_pasted_pixel_count": float(valid_count.item()),
+        "c4/valid_labeled_pixel_ratio": valid_ratio,
+        "c4/ignore_labeled_pasted_pixel_count": float(ignore_count.item()),
+        "c4/ignore_labeled_pixel_ratio": ignore_ratio,
+    }
+
+
+def cut_mix_label_adaptive_c4_direct_labeled(
+    unlabeled_image,
+    unlabeled_mask,
+    unlabeled_logits,
+    labeled_image,
+    labeled_mask,
+    lst_reliabilities,
+    target_boxes,
+    *,
+    unlabeled_probs=None,
+    unlabeled_weight=None,
+    ignore_index=255,
+):
+    """Directly paste labeled crops into their final C4 unlabeled targets."""
+    batch = unlabeled_image.size(0)
+    if labeled_image.size(0) != batch or labeled_mask.size(0) != batch:
+        raise ValueError(
+            "C4 requires equal labeled and unlabeled batch sizes: "
+            f"unlabeled={batch}, labeled_image={labeled_image.size(0)}, labeled_mask={labeled_mask.size(0)}"
+        )
+    if len(lst_reliabilities) != batch:
+        raise ValueError(f"C4 sample reliability must have length {batch}, got {len(lst_reliabilities)}")
+    if unlabeled_image.dim() != 4 or labeled_image.dim() != 4:
+        raise ValueError("C4 labeled and unlabeled images must have shape [B,C,H,W]")
+    if unlabeled_mask.dim() != 3 or labeled_mask.dim() != 3 or unlabeled_logits.dim() != 3:
+        raise ValueError("C4 masks and confidence metadata must have shape [B,H,W]")
+    if unlabeled_image.shape[1:] != labeled_image.shape[1:]:
+        raise ValueError(
+            "C4 labeled/unlabeled image shapes must match after the batch dimension: "
+            f"{tuple(labeled_image.shape[1:])} != {tuple(unlabeled_image.shape[1:])}"
+        )
+    if labeled_image.shape[2:] != labeled_mask.shape[1:]:
+        raise ValueError(
+            "C4 labeled image/GT spatial mismatch: "
+            f"{tuple(labeled_image.shape[2:])} != {tuple(labeled_mask.shape[1:])}"
+        )
+    if unlabeled_image.shape[2:] != unlabeled_mask.shape[1:] or unlabeled_mask.shape != unlabeled_logits.shape:
+        raise ValueError("C4 unlabeled image, pseudo-label, and confidence metadata spatial shapes must match")
+    if unlabeled_weight is None:
+        raise ValueError("C4 requires the official CSL pixel-weight map")
+    if unlabeled_weight.shape != unlabeled_mask.shape:
+        raise ValueError("C4 CSL pixel weight must have shape [B,H,W]")
+    if unlabeled_probs is not None and (
+        unlabeled_probs.dim() != 4
+        or unlabeled_probs.size(0) != batch
+        or unlabeled_probs.shape[2:] != unlabeled_mask.shape[1:]
+    ):
+        raise ValueError("C4 teacher probabilities must have shape [B,C,H,W]")
+
+    target_boxes = torch.as_tensor(target_boxes, device=unlabeled_image.device, dtype=torch.long)
+    if target_boxes.shape != (batch, 4):
+        raise ValueError(f"C4 target_boxes must have shape [{batch},4], got {tuple(target_boxes.shape)}")
+
+    mixed_image = unlabeled_image.clone()
+    mixed_target = unlabeled_mask.clone()
+    mixed_logits = unlabeled_logits.clone()
+    mixed_probs = unlabeled_probs.clone() if unlabeled_probs is not None else None
+    mixed_weight = unlabeled_weight.clone()
+    mix_source_mask = torch.zeros_like(unlabeled_mask, dtype=torch.float32)
+
+    # Exactly one permutation supplies both labeled RGB and its aligned GT.
+    donor_perm = torch.randperm(batch, device=labeled_image.device)
+    target_height, target_width = unlabeled_mask.shape[1:]
+    source_height, source_width = labeled_mask.shape[1:]
+
+    for i in range(batch):
+        reliability_i = float(lst_reliabilities[i])
+        if np.random.random() <= reliability_i:
+            continue
+
+        x1, y1, x2, y2 = (int(value) for value in target_boxes[i].tolist())
+        if not (0 <= x1 < x2 <= target_width and 0 <= y1 < y2 <= target_height):
+            raise ValueError(
+                f"C4 invalid target box for target {i}: [x1={x1}, y1={y1}, x2={x2}, y2={y2}] "
+                f"outside width={target_width}, height={target_height}"
+            )
+        if x2 > source_width or y2 > source_height:
+            raise ValueError(
+                f"C4 target box for target {i} exceeds labeled source geometry "
+                f"width={source_width}, height={source_height}"
+            )
+
+        donor_i = int(donor_perm[i].item())
+        source_image = labeled_image[donor_i, :, y1:y2, x1:x2]
+        source_gt = labeled_mask[donor_i, y1:y2, x1:x2]
+        destination_image = mixed_image[i, :, y1:y2, x1:x2]
+        destination_target = mixed_target[i, y1:y2, x1:x2]
+        if source_image.shape != destination_image.shape:
+            raise ValueError(
+                f"C4 image crop shape mismatch for target {i}, donor {donor_i}: "
+                f"source={tuple(source_image.shape)}, destination={tuple(destination_image.shape)}"
+            )
+        if source_gt.shape != destination_target.shape:
+            raise ValueError(
+                f"C4 GT crop shape mismatch for target {i}, donor {donor_i}: "
+                f"source={tuple(source_gt.shape)}, destination={tuple(destination_target.shape)}"
+            )
+
+        mixed_image[i, :, y1:y2, x1:x2] = source_image
+        mixed_target[i, y1:y2, x1:x2] = source_gt
+        mixed_logits[i, y1:y2, x1:x2] = 1.0
+        if mixed_probs is not None:
+            mixed_probs[i, :, y1:y2, x1:x2] = 0.0
+        valid_labeled = source_gt.ne(ignore_index)
+        mixed_weight[i, y1:y2, x1:x2] = valid_labeled.to(dtype=mixed_weight.dtype)
+        mix_source_mask[i, y1:y2, x1:x2] = 1.0
+
+    if mixed_probs is not None:
+        return mixed_image, mixed_target, mixed_logits, mix_source_mask, mixed_probs, mixed_weight
+    return mixed_image, mixed_target, mixed_logits, mix_source_mask, mixed_weight
+
+
 def cut_mix_label_adaptive_with_mask(
     unlabeled_image,
     unlabeled_mask,
@@ -478,25 +645,34 @@ def thresholded_boundary_mix_loss(
 
 def _rand_bbox(size, lam=None):
     if len(size) == 4:
-        width = size[2]
-        height = size[3]
-    elif len(size) == 3:
-        width = size[1]
         height = size[2]
+        width = size[3]
+    elif len(size) == 3:
+        height = size[1]
+        width = size[2]
     else:
         raise ValueError("size must have 3 or 4 dimensions")
+
     batch = size[0]
 
-    cut_rat = np.sqrt(1.0 - lam)
-    cut_w = int(width * cut_rat)
-    cut_h = int(height * cut_rat)
+    cut_ratio = np.sqrt(1.0 - lam)
+    cut_height = int(height * cut_ratio)
+    cut_width = int(width * cut_ratio)
 
-    cx = np.random.randint(size=[batch], low=int(width / 8), high=width)
-    cy = np.random.randint(size=[batch], low=int(height / 8), high=height)
+    center_row = np.random.randint(
+        size=[batch],
+        low=int(height / 8),
+        high=height,
+    )
+    center_col = np.random.randint(
+        size=[batch],
+        low=int(width / 8),
+        high=width,
+    )
 
-    bbx1 = np.clip(cx - cut_w // 2, 0, width)
-    bby1 = np.clip(cy - cut_h // 2, 0, height)
-    bbx2 = np.clip(cx + cut_w // 2, 0, width)
-    bby2 = np.clip(cy + cut_h // 2, 0, height)
+    row1 = np.clip(center_row - cut_height // 2, 0, height)
+    col1 = np.clip(center_col - cut_width // 2, 0, width)
+    row2 = np.clip(center_row + cut_height // 2, 0, height)
+    col2 = np.clip(center_col + cut_width // 2, 0, width)
 
-    return bbx1, bby1, bbx2, bby2
+    return row1, col1, row2, col2

@@ -27,6 +27,8 @@ from augseg.utils.loss_helper import compute_unsupervised_loss_by_threshold
 from util.boundary_mix import (
     _rand_bbox,
     boundary_mix_debug_stats,
+    compute_c4_direct_mix_stats,
+    cut_mix_label_adaptive_c4_direct_labeled,
     cut_mix_label_adaptive_with_mask,
     thresholded_boundary_mix_loss,
 )
@@ -323,6 +325,19 @@ def build_iter_log_columns():
         "csl_cutmix/selection_entropy",
         "csl_cutmix/target_reliability_selected",
         "csl_cutmix/fallback_ratio",
+        "c4/gate_attempted_count",
+        "c4/gate_pass_count",
+        "c4/gate_pass_ratio",
+        "c4/mixed_sample_count",
+        "c4/mixed_sample_ratio",
+        "c4/pasted_pixel_count",
+        "c4/pasted_pixel_ratio",
+        "c4/selected_box_area_mean",
+        "c4/selected_box_area_ratio_mean",
+        "c4/valid_labeled_pasted_pixel_count",
+        "c4/valid_labeled_pixel_ratio",
+        "c4/ignore_labeled_pasted_pixel_count",
+        "c4/ignore_labeled_pixel_ratio",
         "cuda/max_memory_allocated",
         "cuda/max_memory_reserved",
     ])
@@ -1202,10 +1217,22 @@ def train(
         and csl_mode == "official_guided_cutmix"
         and csl_reliability_mode == "official_pcos"
     )
+    csl_c4_direct_labeled_enabled = (
+        csl_cutmix_enabled
+        and csl_mode == "official_direct_labeled_guided_cutmix_plus_ce_weight"
+        and csl_reliability_mode == "official_pcos"
+        and csl_use_mix_confidence
+        and csl_use_ce_weight
+    )
     if csl_mode == "official_guided_cutmix" and not csl_official_guided_cutmix_enabled:
         raise ValueError(
             "csl.mode='official_guided_cutmix' requires reliability_mode='official_pcos', "
             "use_csl_for_cutmix=true, and csl_cutmix.enabled=true"
+        )
+    if csl_mode == "official_direct_labeled_guided_cutmix_plus_ce_weight" and not csl_c4_direct_labeled_enabled:
+        raise ValueError(
+            "C4 requires reliability_mode='official_pcos', use_csl_for_cutmix=true, "
+            "use_csl_for_mix_confidence=true, use_csl_for_ce_weight=true, and csl_cutmix.enabled=true"
         )
     csl_cutmix_debug_enabled = bool(csl_cutmix_cfg.get("debug_log", False))
     model.train()
@@ -1253,6 +1280,7 @@ def train(
         csl_stats = None
         csl_mask_stats = None
         csl_cutmix_stats = None
+        c4_stats = None
         csl_reliability_u = None
         csl_weight_u = None
         csl_reliable_mask_u = None
@@ -1455,14 +1483,29 @@ def train(
                     try:
                         if csl_official_guided_cutmix_enabled and csl_reliability_u is None:
                             raise ValueError("official guided CutMix requires official PCOS reliability map")
-                        csl_target_boxes, csl_cutmix_stats = get_csl_guided_boxes(
-                            csl_reliability_u,
-                            _rand_bbox,
-                            num_candidates=int(csl_cutmix_cfg.get("num_candidates", 8)),
-                            temperature=float(csl_cutmix_cfg.get("temperature", 0.2)),
-                            policy=csl_cutmix_cfg.get("target_policy", "low_reliability"),
-                        )
+                        if csl_c4_direct_labeled_enabled:
+                            csl_target_boxes, csl_cutmix_stats = get_csl_guided_boxes(
+                                csl_reliability_u,
+                                _rand_bbox,
+                                num_candidates=int(csl_cutmix_cfg.get("num_candidates", 8)),
+                                temperature=float(csl_cutmix_cfg.get("temperature", 0.2)),
+                                policy=csl_cutmix_cfg.get("target_policy", "low_reliability"),
+                                strict=True,
+                            )
+                        else:
+                            csl_target_boxes, csl_cutmix_stats = get_csl_guided_boxes(
+                                csl_reliability_u,
+                                _rand_bbox,
+                                num_candidates=int(csl_cutmix_cfg.get("num_candidates", 8)),
+                                temperature=float(csl_cutmix_cfg.get("temperature", 0.2)),
+                                policy=csl_cutmix_cfg.get("target_policy", "low_reliability"),
+                            )
                     except Exception as exc:
+                        if csl_c4_direct_labeled_enabled:
+                            raise RuntimeError(
+                                f"C4 strict target-box selection failed at epoch={epoch}, "
+                                f"step={step}, global_iter={i_iter}"
+                            ) from exc
                         csl_target_boxes = None
                         csl_cutmix_stats = {"csl_cutmix/fallback_ratio": 1.0}
                         if rank == 0 and csl_cutmix_debug_enabled:
@@ -1479,7 +1522,58 @@ def train(
                     or csl_use_ce_weight
                     or csl_cutmix_enabled
                 ):
-                    if boundary_component_enabled:
+                    if csl_c4_direct_labeled_enabled:
+                        # get_csl_guided_boxes uses repository [row1,col1,row2,col2]
+                        # coordinates; the isolated C4 helper consumes [x1,y1,x2,y2].
+                        c4_target_boxes = csl_target_boxes[:, [1, 0, 3, 2]]
+                        (
+                            image_u_aug,
+                            label_u_aug,
+                            logits_u_aug,
+                            mix_source_mask,
+                            csl_weight_u,
+                        ) = cut_mix_label_adaptive_c4_direct_labeled(
+                            image_u_aug,
+                            label_u_aug,
+                            logits_u_aug,
+                            image_l,
+                            label_l,
+                            confidence,
+                            c4_target_boxes,
+                            unlabeled_weight=csl_weight_u,
+                            ignore_index=ignore,
+                        )
+                        c4_stats = compute_c4_direct_mix_stats(
+                            mix_source_mask,
+                            label_u_aug,
+                            c4_target_boxes,
+                            ignore_index=ignore,
+                        )
+                        if (
+                            rank == 0
+                            and csl_cutmix_debug_enabled
+                            and (
+                                step < int(csl_cutmix_cfg.get("debug_first_batches", 3))
+                                or do_log_now
+                            )
+                        ):
+                            logger.info(
+                                "[c4] epoch=%d step=%d global_iter=%d gate=%d/%d "
+                                "mixed=%d/%d pasted=%.6f valid=%.6f ignore=%.6f"
+                                % (
+                                    epoch,
+                                    step,
+                                    i_iter,
+                                    c4_stats["c4/gate_pass_count"],
+                                    c4_stats["c4/gate_attempted_count"],
+                                    c4_stats["c4/mixed_sample_count"],
+                                    c4_stats["c4/gate_attempted_count"],
+                                    c4_stats["c4/pasted_pixel_ratio"],
+                                    c4_stats["c4/valid_labeled_pixel_ratio"],
+                                    c4_stats["c4/ignore_labeled_pixel_ratio"],
+                                )
+                            )
+                    elif boundary_component_enabled:
                         mixed_result = cut_mix_label_adaptive_with_mask(
                             image_u_aug, label_u_aug, logits_u_aug,
                             image_l, label_l, confidence,
@@ -2189,6 +2283,7 @@ def train(
                         "guided_cutmix": 3.0,
                         "official_reliability_replace_confidence": 4.0,
                         "official_reliable_mask_perturbation": 5.0,
+                        "official_direct_labeled_guided_cutmix_plus_ce_weight": 6.0,
                     }.get(csl_cfg.get("mode", "disabled"), -1.0)
                     log_dict.update({
                         "csl/enabled": 1.0,
@@ -2217,6 +2312,11 @@ def train(
                                 log_dict[key] = value
                 else:
                     log_dict["csl_cutmix/enabled"] = 0.0
+
+                if c4_stats is not None:
+                    for key, value in c4_stats.items():
+                        if key in ITER_LOG_COLUMNS:
+                            log_dict[key] = value
 
                 if torch.cuda.is_available():
                     log_dict["cuda/max_memory_allocated"] = float(torch.cuda.max_memory_allocated(local_rank))
