@@ -366,6 +366,72 @@ def cut_mix_label_adaptive_c4_direct_labeled(
     return mixed_image, mixed_target, mixed_logits, mix_source_mask, mixed_weight
 
 
+_S2_RELOCATED_SEED_SALT = 0x53A2C9D71B4E680F
+_UINT64_MASK = (1 << 64) - 1
+_TORCH_SEED_MASK = (1 << 63) - 1
+
+
+def _stable_s2_destination_seed(base_seed, rank, epoch, iteration, target_index):
+    value = _S2_RELOCATED_SEED_SALT
+    fields = (base_seed, rank, epoch, iteration, target_index)
+    constants = (
+        0x9E3779B185EBCA87,
+        0xC2B2AE3D27D4EB4F,
+        0x165667B19E3779F9,
+        0x85EBCA77C2B2AE63,
+        0x27D4EB2F165667C5,
+    )
+    for field, constant in zip(fields, constants):
+        mixed = (int(field) & _UINT64_MASK) * constant
+        value ^= mixed & _UINT64_MASK
+        value = (value * 0x9E3779B97F4A7C15 + 0xD1B54A32D192ED03) & _UINT64_MASK
+        value ^= value >> 29
+    return value & _TORCH_SEED_MASK
+
+
+def _translate_mask_to_random_valid_destination(source_mask, generator):
+    if source_mask.dim() != 2 or source_mask.dtype != torch.bool:
+        raise ValueError("source_mask must be a boolean tensor with shape [H,W]")
+    active = source_mask.nonzero(as_tuple=False)
+    if active.numel() == 0:
+        raise ValueError("source_mask must be nonempty")
+
+    height, width = source_mask.shape
+    src_top = int(active[:, 0].min().item())
+    src_bottom = int(active[:, 0].max().item()) + 1
+    src_left = int(active[:, 1].min().item())
+    src_right = int(active[:, 1].max().item()) + 1
+    extent_h = src_bottom - src_top
+    extent_w = src_right - src_left
+    num_rows = height - extent_h + 1
+    num_cols = width - extent_w + 1
+    dst_top = int(torch.randint(0, num_rows, (1,), generator=generator, device="cpu").item())
+    dst_left = int(torch.randint(0, num_cols, (1,), generator=generator, device="cpu").item())
+    dst_bottom = dst_top + extent_h
+    dst_right = dst_left + extent_w
+    local_mask = source_mask[src_top:src_bottom, src_left:src_right]
+    translated_mask = torch.zeros_like(source_mask)
+    translated_mask[dst_top:dst_bottom, dst_left:dst_right] = local_mask
+    intersection = (source_mask & translated_mask).sum().item()
+    union = (source_mask | translated_mask).sum().item()
+
+    return {
+        "source_extent": (src_top, src_left, src_bottom, src_right),
+        "destination_extent": (dst_top, dst_left, dst_bottom, dst_right),
+        "local_mask": local_mask,
+        "translated_mask": translated_mask,
+        "delta_r": dst_top - src_top,
+        "delta_c": dst_left - src_left,
+        "num_valid_translations": num_rows * num_cols,
+        "source_destination_iou": float(intersection) / float(union),
+    }
+
+
+def _add_relocation_diagnostic(diagnostics, key, value):
+    if diagnostics is not None:
+        diagnostics[key] = diagnostics.get(key, 0) + value
+
+
 def cut_mix_label_adaptive_with_mask(
     unlabeled_image,
     unlabeled_mask,
@@ -386,6 +452,8 @@ def cut_mix_label_adaptive_with_mask(
     csl_destination_num_candidates=8,
     csl_destination_temperature=0.2,
     csl_destination_policy="low_reliability",
+    destination_context=None,
+    destination_diagnostics=None,
 ):
     assert len(lst_confidences) == len(unlabeled_image), "Ensure the confidence is properly obtained"
     assert labeled_image.shape == unlabeled_image.shape, "Ensure shape match between lb and unlb"
@@ -410,6 +478,7 @@ def cut_mix_label_adaptive_with_mask(
         "same_coordinate",
         "random_target",
         "csl_official_fixed_size_target",
+        "component_mask_random_valid_destination",
     ):
         raise ValueError(f"Unsupported direct_paste_policy: {direct_paste_policy}")
 
@@ -524,6 +593,77 @@ def cut_mix_label_adaptive_with_mask(
             if mix_unlabeled_weight is not None:
                 mix_unlabeled_weight[i, dst_h1:dst_h2, dst_w1:dst_w2] = 1.0
             mix_source_mask[i, dst_h1:dst_h2, dst_w1:dst_w2] = 1.0
+
+        return _return_with_optional_metadata()
+
+    if (
+        direct_labeled_mix
+        and labeled_masks is not None
+        and direct_paste_policy == "component_mask_random_valid_destination"
+    ):
+        labeled_masks = torch.as_tensor(labeled_masks, device=unlabeled_image.device, dtype=torch.bool)
+        if labeled_masks.shape != unlabeled_mask.shape:
+            raise ValueError("labeled_masks must have shape [B,H,W]")
+        if not isinstance(destination_context, dict):
+            raise ValueError("relocated component-mask policy requires destination_context")
+        required_context = ("base_seed", "rank", "epoch", "iteration")
+        if any(key not in destination_context for key in required_context):
+            raise ValueError("destination_context requires base_seed, rank, epoch, and iteration")
+
+        for i in range(unlabeled_mask.size(0)):
+            src = int(u_rand_index[i].item())
+            source_mask = labeled_masks[src]
+            if not source_mask.any():
+                _add_relocation_diagnostic(destination_diagnostics, "relocation_empty_mask_count", 1)
+                continue
+            seed = _stable_s2_destination_seed(
+                destination_context["base_seed"],
+                destination_context["rank"],
+                destination_context["epoch"],
+                destination_context["iteration"],
+                i,
+            )
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(seed)
+            translation = _translate_mask_to_random_valid_destination(source_mask, generator)
+            src_h1, src_w1, src_h2, src_w2 = translation["source_extent"]
+            dst_h1, dst_w1, dst_h2, dst_w2 = translation["destination_extent"]
+            local_mask = translation["local_mask"]
+
+            destination_image = mix_unlabeled_image[i, :, dst_h1:dst_h2, dst_w1:dst_w2]
+            destination_target = mix_unlabeled_target[i, dst_h1:dst_h2, dst_w1:dst_w2]
+            destination_logits = mix_unlabeled_logits[i, dst_h1:dst_h2, dst_w1:dst_w2]
+            destination_image[:, local_mask] = labeled_image[src, :, src_h1:src_h2, src_w1:src_w2][:, local_mask]
+            destination_target[local_mask] = labeled_mask[src, src_h1:src_h2, src_w1:src_w2][local_mask]
+            destination_logits[local_mask] = 1.0
+            if mix_unlabeled_probs is not None:
+                mix_unlabeled_probs[i, :, dst_h1:dst_h2, dst_w1:dst_w2][:, local_mask] = 0.0
+            if mix_unlabeled_weight is not None:
+                mix_unlabeled_weight[i, dst_h1:dst_h2, dst_w1:dst_w2][local_mask] = 1.0
+            mix_source_mask[i, dst_h1:dst_h2, dst_w1:dst_w2][local_mask] = 1.0
+
+            delta_r = translation["delta_r"]
+            delta_c = translation["delta_c"]
+            num_valid = translation["num_valid_translations"]
+            is_zero = delta_r == 0 and delta_c == 0
+            _add_relocation_diagnostic(destination_diagnostics, "relocation_draw_count", 1)
+            _add_relocation_diagnostic(destination_diagnostics, "relocation_zero_count", int(is_zero))
+            _add_relocation_diagnostic(destination_diagnostics, "relocation_nonzero_count", int(not is_zero))
+            _add_relocation_diagnostic(destination_diagnostics, "relocation_success_count", int(not is_zero))
+            _add_relocation_diagnostic(destination_diagnostics, "relocation_zero_only_count", int(num_valid == 1))
+            _add_relocation_diagnostic(destination_diagnostics, "relocation_random_zero_count", int(is_zero and num_valid > 1))
+            _add_relocation_diagnostic(destination_diagnostics, "relocation_valid_translation_sum", num_valid)
+            _add_relocation_diagnostic(destination_diagnostics, "relocation_expected_zero_sum", 1.0 / float(num_valid))
+            _add_relocation_diagnostic(
+                destination_diagnostics,
+                "relocation_displacement_magnitude_sum",
+                float(delta_r * delta_r + delta_c * delta_c) ** 0.5,
+            )
+            _add_relocation_diagnostic(
+                destination_diagnostics,
+                "relocation_source_destination_iou_sum",
+                translation["source_destination_iou"],
+            )
 
         return _return_with_optional_metadata()
 
