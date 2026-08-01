@@ -2,6 +2,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from util.csl_cutmix import select_fixed_size_csl_destination
+
 
 def _as_bchw_mask(mask):
     if mask.dim() == 3:
@@ -380,6 +382,10 @@ def cut_mix_label_adaptive_with_mask(
     direct_paste_policy="same_coordinate",
     direct_confidence_gate=False,
     target_boxes=None,
+    csl_destination_reliability=None,
+    csl_destination_num_candidates=8,
+    csl_destination_temperature=0.2,
+    csl_destination_policy="low_reliability",
 ):
     assert len(lst_confidences) == len(unlabeled_image), "Ensure the confidence is properly obtained"
     assert labeled_image.shape == unlabeled_image.shape, "Ensure shape match between lb and unlb"
@@ -400,7 +406,11 @@ def cut_mix_label_adaptive_with_mask(
 
     if labeled_boxes is not None and labeled_masks is not None:
         raise ValueError("labeled_boxes and labeled_masks cannot both be provided")
-    if direct_paste_policy not in ("same_coordinate", "random_target"):
+    if direct_paste_policy not in (
+        "same_coordinate",
+        "random_target",
+        "csl_official_fixed_size_target",
+    ):
         raise ValueError(f"Unsupported direct_paste_policy: {direct_paste_policy}")
 
     def _return_with_optional_metadata():
@@ -473,7 +483,22 @@ def cut_mix_label_adaptive_with_mask(
 
             crop_h = src_h2 - src_h1
             crop_w = src_w2 - src_w1
-            if direct_paste_policy == "random_target":
+            if direct_paste_policy == "csl_official_fixed_size_target":
+                if csl_destination_reliability is None:
+                    raise ValueError("fixed-size official CSL destination requires reliability")
+                if csl_destination_reliability.shape != unlabeled_mask.shape:
+                    raise ValueError("fixed-size official CSL reliability must have shape [B,H,W]")
+                selected_box, _ = select_fixed_size_csl_destination(
+                    csl_destination_reliability[i],
+                    crop_h,
+                    crop_w,
+                    num_candidates=csl_destination_num_candidates,
+                    temperature=csl_destination_temperature,
+                    policy=csl_destination_policy,
+                    target_index=i,
+                )
+                dst_h1, dst_w1, dst_h2, dst_w2 = selected_box.tolist()
+            elif direct_paste_policy == "random_target":
                 max_h = height - crop_h
                 max_w = width - crop_w
                 dst_h1 = int(torch.randint(0, max_h + 1, (1,), device=unlabeled_image.device).item())

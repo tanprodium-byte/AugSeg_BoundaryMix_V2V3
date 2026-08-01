@@ -701,6 +701,13 @@ def main(in_args):
     cfg["csl_cutmix"].setdefault("fallback", "random_box")
     cfg["csl_cutmix"].setdefault("debug_log", False)
 
+    cfg.setdefault("fixed_size_csl_destination", {})
+    cfg["fixed_size_csl_destination"].setdefault("enabled", False)
+    cfg["fixed_size_csl_destination"].setdefault("num_candidates", 8)
+    cfg["fixed_size_csl_destination"].setdefault("selection", "softmax")
+    cfg["fixed_size_csl_destination"].setdefault("temperature", 0.2)
+    cfg["fixed_size_csl_destination"].setdefault("target_policy", "low_reliability")
+
     if rank == 0:
         crop_size = cfg.get("dataset", {}).get("train", {}).get("crop", {}).get("size", [])
         per_gpu_batch = int(cfg.get("dataset", {}).get("train", {}).get("batch_size", 1))
@@ -1212,6 +1219,14 @@ def train(
     csl_debug_enabled = bool(csl_cfg.get("debug_log", False))
     csl_cutmix_cfg = cfg.get("csl_cutmix", {})
     csl_cutmix_enabled = csl_use_cutmix and bool(csl_cutmix_cfg.get("enabled", False))
+    fixed_size_csl_destination_cfg = cfg.get("fixed_size_csl_destination", {})
+    fixed_size_csl_destination_enabled = bool(fixed_size_csl_destination_cfg.get("enabled", False))
+    s1_adaptive_fixed_size_csl_enabled = (
+        fixed_size_csl_destination_enabled
+        and csl_enabled
+        and csl_mode == "s1_adaptive_relocated_official_fixed_size_cutmix"
+        and csl_reliability_mode == "official_pcos"
+    )
     csl_official_guided_cutmix_enabled = (
         csl_cutmix_enabled
         and csl_mode == "official_guided_cutmix"
@@ -1234,6 +1249,41 @@ def train(
             "C4 requires reliability_mode='official_pcos', use_csl_for_cutmix=true, "
             "use_csl_for_mix_confidence=true, use_csl_for_ce_weight=true, and csl_cutmix.enabled=true"
         )
+    if (
+        fixed_size_csl_destination_enabled
+        or saliency_cutmix_cfg.get("direct_paste_policy") == "csl_official_fixed_size_target"
+    ) and csl_mode != "s1_adaptive_relocated_official_fixed_size_cutmix":
+        raise ValueError(
+            "fixed-size official CSL destination selection is reserved for "
+            "csl.mode='s1_adaptive_relocated_official_fixed_size_cutmix'"
+        )
+    if csl_mode == "s1_adaptive_relocated_official_fixed_size_cutmix":
+        valid_s1_fixed_size_csl = (
+            s1_adaptive_fixed_size_csl_enabled
+            and saliency_cutmix_enabled
+            and saliency_cutmix_cfg.get("mode", "box") == "box"
+            and bool(saliency_cutmix_cfg.get("direct_labeled_mix", False))
+            and saliency_cutmix_cfg.get("direct_paste_policy") == "csl_official_fixed_size_target"
+            and bool(saliency_cutmix_cfg.get("direct_confidence_gate", False))
+            and not csl_use_mix_confidence
+            and not csl_use_ce_weight
+            and not csl_use_cutmix
+            and not csl_perturb_input
+            and not boundary_mix_enabled
+            and not boundary_component_enabled
+            and not boundary_compatibility_enabled
+            and int(fixed_size_csl_destination_cfg.get("num_candidates", 8)) == 8
+            and fixed_size_csl_destination_cfg.get("selection", "softmax") == "softmax"
+            and float(fixed_size_csl_destination_cfg.get("temperature", 0.2)) == 0.2
+            and fixed_size_csl_destination_cfg.get("target_policy", "low_reliability") == "low_reliability"
+        )
+        if not valid_s1_fixed_size_csl:
+            raise ValueError(
+                "s1_adaptive_relocated_official_fixed_size_cutmix requires S1 box direct mixing, "
+                "the adaptive confidence gate, fixed-size CSL K=8 low-reliability softmax selection "
+                "at temperature 0.2, official PCOS reliability, and all CSL confidence/loss, "
+                "perturbation, BoundaryMix, component, BCR, C3, and C4 paths disabled"
+            )
     csl_cutmix_debug_enabled = bool(csl_cutmix_cfg.get("debug_log", False))
     model.train()
     
@@ -1585,6 +1635,10 @@ def train(
                             direct_paste_policy=saliency_cutmix_cfg.get("direct_paste_policy", "same_coordinate"),
                             direct_confidence_gate=bool(saliency_cutmix_cfg.get("direct_confidence_gate", False)),
                             target_boxes=csl_target_boxes,
+                            csl_destination_reliability=csl_reliability_u if s1_adaptive_fixed_size_csl_enabled else None,
+                            csl_destination_num_candidates=int(fixed_size_csl_destination_cfg.get("num_candidates", 8)),
+                            csl_destination_temperature=float(fixed_size_csl_destination_cfg.get("temperature", 0.2)),
+                            csl_destination_policy=fixed_size_csl_destination_cfg.get("target_policy", "low_reliability"),
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:
                             (
@@ -1638,6 +1692,10 @@ def train(
                             direct_paste_policy=saliency_cutmix_cfg.get("direct_paste_policy", "same_coordinate"),
                             direct_confidence_gate=bool(saliency_cutmix_cfg.get("direct_confidence_gate", False)),
                             target_boxes=csl_target_boxes,
+                            csl_destination_reliability=csl_reliability_u if s1_adaptive_fixed_size_csl_enabled else None,
+                            csl_destination_num_candidates=int(fixed_size_csl_destination_cfg.get("num_candidates", 8)),
+                            csl_destination_temperature=float(fixed_size_csl_destination_cfg.get("temperature", 0.2)),
+                            csl_destination_policy=fixed_size_csl_destination_cfg.get("target_policy", "low_reliability"),
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:
                             image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, teacher_probs_u_aug, csl_weight_u = mixed_result

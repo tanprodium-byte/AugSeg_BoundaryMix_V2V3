@@ -25,7 +25,10 @@ from util.csl_cutmix import get_csl_guided_boxes  # noqa: E402
 CONFIG = (
     ROOT
     / "exps/boundary_mix_v2_v3/voc_semi662"
-    / "c4_csl_official_direct_labeled_guided_cutmix_plus_ce_weight/config.yaml"
+    / (
+        "c4_csl_official_direct_labeled_adaptive_gate_"
+        "guided_cutmix_plus_ce_weight_v1/config.yaml"
+    )
 )
 TRAIN = ROOT / "train_semi.py"
 
@@ -354,6 +357,45 @@ def test_strict_failure_and_default_fallback():
 
 def test_config_and_isolated_dispatch():
     cfg = yaml.safe_load(CONFIG.read_text())
+
+    experiment_identity = (
+        "c4_csl_official_direct_labeled_adaptive_gate_"
+        "guided_cutmix_plus_ce_weight_v1"
+    )
+    legacy_identity = (
+        "c4_csl_official_direct_labeled_guided_cutmix_plus_ce_weight"
+    )
+
+    require(
+        cfg["name"] == experiment_identity,
+        "C4 adaptive-gate experiment name must use the new identity",
+    )
+    require(
+        cfg["name"] != legacy_identity,
+        "C4 adaptive-gate experiment must not reuse the legacy identity",
+    )
+    require(
+        cfg["saver"]["snapshot_dir"]
+        == f"../../../../exp_boundary_mix_v2_v3/{experiment_identity}",
+        "C4 snapshot path must use the new identity",
+    )
+    require(
+        cfg["wandb"]["name"] == experiment_identity,
+        "C4 W&B name must use the new identity",
+    )
+    require(
+        cfg["run"]["name"] == experiment_identity,
+        "C4 run name must use the new identity",
+    )
+    require(
+        cfg["hf"]["path_in_repo"]
+        == (
+            "boundary_mix_v2_v3/voc_semi662/"
+            f"{experiment_identity}/latest.tar.gz"
+        ),
+        "C4 HF path must use the new identity",
+    )
+
     csl = cfg["csl"]
     require(csl["mode"] == "official_direct_labeled_guided_cutmix_plus_ce_weight", "exact C4 mode")
     require(cfg["trainer"]["unsupervised"]["use_cutmix"] is True, "outer CutMix enabled")

@@ -10,6 +10,67 @@ from util.saliency_cutmix import (
 )
 
 
+@torch.no_grad()
+def select_fixed_size_csl_destination(
+    reliability,
+    crop_h,
+    crop_w,
+    *,
+    num_candidates=8,
+    temperature=0.2,
+    policy="low_reliability",
+    target_index=None,
+):
+    """Select one fixed-size low-reliability destination for a final target."""
+    reliability_shape = tuple(reliability.shape)
+    image_size = reliability_shape[-2:] if reliability.dim() >= 2 else reliability_shape
+    try:
+        if reliability.dim() != 2:
+            raise ValueError("reliability must have shape [H,W]")
+        if policy != "low_reliability":
+            raise ValueError("target policy must be 'low_reliability'")
+        if int(num_candidates) <= 0:
+            raise ValueError("num_candidates must be positive")
+
+        height, width = reliability.shape
+        crop_h = int(crop_h)
+        crop_w = int(crop_w)
+        if crop_h <= 0 or crop_w <= 0:
+            raise ValueError("source crop height and width must be positive")
+        if crop_h > height or crop_w > width:
+            raise ValueError("source crop must fit within the target image")
+
+        max_row = height - crop_h
+        max_col = width - crop_w
+        candidates = []
+        for _ in range(int(num_candidates)):
+            row1 = int(torch.randint(0, max_row + 1, (1,), device=reliability.device).item())
+            col1 = int(torch.randint(0, max_col + 1, (1,), device=reliability.device).item())
+            candidates.append((row1, col1, row1 + crop_h, col1 + crop_w))
+
+        boxes = torch.tensor(candidates, device=reliability.device, dtype=torch.long).unsqueeze(0)
+        score_map = 1.0 - reliability.detach().float().clamp(0.0, 1.0)
+        scores = box_mean_saliency(score_map.unsqueeze(0), boxes)
+        selected_idx, probs = sample_box_by_softmax(scores, temperature=float(temperature))
+        selected_box = boxes[0, selected_idx[0]].detach()
+        diagnostics = {
+            "candidates": boxes[0].detach(),
+            "scores": scores[0].detach(),
+            "probabilities": probs[0].detach(),
+            "selected_index": selected_idx[0].detach(),
+            "selected_box": selected_box,
+        }
+        return selected_box, diagnostics
+    except Exception as exc:
+        raise RuntimeError(
+            "s1_saliency_box_adaptive_relocated_plus_csl_official_cutmix "
+            f"destination selection failed: target_index={target_index}, "
+            f"reliability_shape={reliability_shape}, crop_size=({crop_h},{crop_w}), "
+            f"image_size={image_size}, num_candidates={num_candidates}, "
+            f"original_error={exc}"
+        ) from exc
+
+
 def _stats_from_csl_scores(scores, selected_idx, probs, reliability, boxes, fallback_ratio=0.0):
     batch_index = torch.arange(scores.size(0), device=scores.device)
     selected_scores = scores[batch_index, selected_idx]
