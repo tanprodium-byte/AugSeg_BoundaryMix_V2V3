@@ -550,7 +550,6 @@ def main(in_args):
         set_random_seed(args.seed, deterministic=True)
         # set_random_seed(args.seed)
     cfg = yaml.load(open(args.config, "r"), Loader=yaml.Loader)
-    cfg["_runtime_seed"] = int(args.seed if args.seed is not None else 0)
     rank, word_size = setup_distributed(port=args.port)
 
     # ✅ đặt ở đây
@@ -963,6 +962,7 @@ def main(in_args):
             cfg,
             wandb_run,   # <-- thêm dòng này
             train_iter_csv=train_iter_csv,
+            runtime_seed=int(args.seed),
         )
 
         # Validation and store checkpoint
@@ -1197,7 +1197,8 @@ def train(
     logger,
     cfg,
     wandb_run=None,   # <-- thêm
-    train_iter_csv=None
+    train_iter_csv=None,
+    runtime_seed=0,
 ):
 
     local_rank = torch.cuda.current_device()
@@ -1226,6 +1227,10 @@ def train(
     saliency_cutmix_cfg = cfg.get("saliency_cutmix", {})
     saliency_cutmix_enabled = bool(saliency_cutmix_cfg.get("enabled", False))
     saliency_cutmix_debug_enabled = bool(saliency_cutmix_cfg.get("debug_log", False))
+    s2_relocated_policy_active = (
+        saliency_cutmix_cfg.get("direct_paste_policy")
+        == "component_mask_random_valid_destination"
+    )
     csl_cfg = cfg.get("csl", {})
     csl_enabled = bool(csl_cfg.get("enabled", False))
     csl_mode = csl_cfg.get("mode", "disabled")
@@ -1261,7 +1266,7 @@ def train(
         and csl_use_mix_confidence
         and csl_use_ce_weight
     )
-    if saliency_cutmix_cfg.get("direct_paste_policy") == "component_mask_random_valid_destination":
+    if s2_relocated_policy_active:
         valid_s2_relocated = (
             saliency_cutmix_enabled
             and saliency_cutmix_cfg.get("mode") == "component_mask"
@@ -1375,19 +1380,31 @@ def train(
         csl_weight_u = None
         csl_reliable_mask_u = None
         saliency_selector_exception_batch = 0
-        relocation_diagnostics = {
-            "relocation_draw_count": 0,
-            "relocation_zero_count": 0,
-            "relocation_nonzero_count": 0,
-            "relocation_success_count": 0,
-            "relocation_zero_only_count": 0,
-            "relocation_random_zero_count": 0,
-            "relocation_empty_mask_count": 0,
-            "relocation_valid_translation_sum": 0,
-            "relocation_expected_zero_sum": 0.0,
-            "relocation_displacement_magnitude_sum": 0.0,
-            "relocation_source_destination_iou_sum": 0.0,
-        }
+        relocation_diagnostics = None
+        destination_kwargs = {}
+        if s2_relocated_policy_active:
+            relocation_diagnostics = {
+                "relocation_draw_count": 0,
+                "relocation_zero_count": 0,
+                "relocation_nonzero_count": 0,
+                "relocation_success_count": 0,
+                "relocation_zero_only_count": 0,
+                "relocation_random_zero_count": 0,
+                "relocation_empty_mask_count": 0,
+                "relocation_valid_translation_sum": 0,
+                "relocation_expected_zero_sum": 0.0,
+                "relocation_displacement_magnitude_sum": 0.0,
+                "relocation_source_destination_iou_sum": 0.0,
+            }
+            destination_kwargs = {
+                "destination_context": {
+                    "base_seed": runtime_seed,
+                    "rank": rank,
+                    "epoch": epoch,
+                    "iteration": epoch * len(loader_l) + step,
+                },
+                "destination_diagnostics": relocation_diagnostics,
+            }
 
         i_iter = epoch * len(loader_l) + step # total iters till now
         # log schedule (đúng y hệt block W&B phía dưới)
@@ -1694,13 +1711,7 @@ def train(
                             csl_destination_num_candidates=int(fixed_size_csl_destination_cfg.get("num_candidates", 8)),
                             csl_destination_temperature=float(fixed_size_csl_destination_cfg.get("temperature", 0.2)),
                             csl_destination_policy=fixed_size_csl_destination_cfg.get("target_policy", "low_reliability"),
-                            destination_context={
-                                "base_seed": cfg.get("_runtime_seed", 0),
-                                "rank": rank,
-                                "epoch": epoch,
-                                "iteration": i_iter,
-                            },
-                            destination_diagnostics=relocation_diagnostics,
+                            **destination_kwargs,
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:
                             (
@@ -1758,13 +1769,7 @@ def train(
                             csl_destination_num_candidates=int(fixed_size_csl_destination_cfg.get("num_candidates", 8)),
                             csl_destination_temperature=float(fixed_size_csl_destination_cfg.get("temperature", 0.2)),
                             csl_destination_policy=fixed_size_csl_destination_cfg.get("target_policy", "low_reliability"),
-                            destination_context={
-                                "base_seed": cfg.get("_runtime_seed", 0),
-                                "rank": rank,
-                                "epoch": epoch,
-                                "iteration": i_iter,
-                            },
-                            destination_diagnostics=relocation_diagnostics,
+                            **destination_kwargs,
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:
                             image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, teacher_probs_u_aug, csl_weight_u = mixed_result
@@ -2402,21 +2407,22 @@ def train(
                     log_dict["saliency/enabled"] = 0.0
                     log_dict["saliency/mode"] = 0.0
 
-                relocation_draw_count = float(relocation_diagnostics["relocation_draw_count"])
-                relocation_denominator = relocation_draw_count if relocation_draw_count > 0 else 1.0
-                log_dict.update(relocation_diagnostics)
-                log_dict.update({
-                    "relocation_zero_rate": float(relocation_diagnostics["relocation_zero_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "relocation_nonzero_rate": float(relocation_diagnostics["relocation_nonzero_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "relocation_success_rate": float(relocation_diagnostics["relocation_success_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "relocation_zero_only_rate": float(relocation_diagnostics["relocation_zero_only_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "relocation_random_zero_rate": float(relocation_diagnostics["relocation_random_zero_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "relocation_mean_valid_translation_count": float(relocation_diagnostics["relocation_valid_translation_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "relocation_expected_zero_rate": float(relocation_diagnostics["relocation_expected_zero_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "relocation_mean_displacement_magnitude": float(relocation_diagnostics["relocation_displacement_magnitude_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "relocation_mean_source_destination_iou": float(relocation_diagnostics["relocation_source_destination_iou_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
-                    "saliency_selector_exception_batch": int(saliency_selector_exception_batch),
-                })
+                if s2_relocated_policy_active:
+                    relocation_draw_count = float(relocation_diagnostics["relocation_draw_count"])
+                    relocation_denominator = relocation_draw_count if relocation_draw_count > 0 else 1.0
+                    log_dict.update(relocation_diagnostics)
+                    log_dict.update({
+                        "relocation_zero_rate": float(relocation_diagnostics["relocation_zero_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                        "relocation_nonzero_rate": float(relocation_diagnostics["relocation_nonzero_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                        "relocation_success_rate": float(relocation_diagnostics["relocation_success_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                        "relocation_zero_only_rate": float(relocation_diagnostics["relocation_zero_only_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                        "relocation_random_zero_rate": float(relocation_diagnostics["relocation_random_zero_count"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                        "relocation_mean_valid_translation_count": float(relocation_diagnostics["relocation_valid_translation_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                        "relocation_expected_zero_rate": float(relocation_diagnostics["relocation_expected_zero_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                        "relocation_mean_displacement_magnitude": float(relocation_diagnostics["relocation_displacement_magnitude_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                        "relocation_mean_source_destination_iou": float(relocation_diagnostics["relocation_source_destination_iou_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                    })
+                log_dict["saliency_selector_exception_batch"] = int(saliency_selector_exception_batch)
 
                 if csl_enabled:
                     csl_mode_value = {

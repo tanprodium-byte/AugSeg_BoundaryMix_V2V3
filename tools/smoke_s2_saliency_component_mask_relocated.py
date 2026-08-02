@@ -446,6 +446,44 @@ def test_source_control_flow_and_logging():
     print("PASS selector_exception clear_outputs=1 legacy_fallback_reachable=1 scalar_assignment_only=1")
 
 
+def test_runtime_seed_plumbing():
+    train_source = Path(ROOT, "train_semi.py").read_text()
+    train_tree = ast.parse(train_source)
+    require('cfg["_runtime_seed"]' not in train_source, "runtime seed leaked into shared config")
+
+    train_defs = [node for node in train_tree.body if isinstance(node, ast.FunctionDef) and node.name == "train"]
+    require(len(train_defs) == 1, "single train definition")
+    train_def = train_defs[0]
+    require(train_def.args.args[-1].arg == "runtime_seed", "runtime_seed is trailing train argument")
+    require(isinstance(train_def.args.defaults[-1], ast.Constant) and train_def.args.defaults[-1].value == 0, "runtime_seed default")
+
+    main_def = next(node for node in train_tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    production_calls = [
+        node for node in ast.walk(main_def)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "train"
+    ]
+    require(len(production_calls) == 1, "single production train call")
+    seed_keywords = [keyword for keyword in production_calls[0].keywords if keyword.arg == "runtime_seed"]
+    require(len(seed_keywords) == 1, "explicit runtime_seed keyword")
+    seed_value = seed_keywords[0].value
+    require(
+        isinstance(seed_value, ast.Call)
+        and isinstance(seed_value.func, ast.Name)
+        and seed_value.func.id == "int"
+        and len(seed_value.args) == 1
+        and isinstance(seed_value.args[0], ast.Attribute)
+        and isinstance(seed_value.args[0].value, ast.Name)
+        and seed_value.args[0].value.id == "args"
+        and seed_value.args[0].attr == "seed",
+        "main passes int(args.seed)",
+    )
+    require('"base_seed": runtime_seed' in train_source, "destination context uses runtime_seed")
+    require("if s2_relocated_policy_active:" in train_source, "relocation plumbing policy guard")
+    require(train_source.count("**destination_kwargs,") == 2, "both mixer calls use guarded destination kwargs")
+    print("PASS runtime_seed explicit_train_argument=1 shared_config_mutation=0 destination_context=1")
+    print("PASS destination_plumbing guarded_call_sites=2 legacy_active_diagnostics=0")
+
+
 def main():
     test_legacy_same_coordinate_snapshot()
     test_legacy_tuple_matrix()
@@ -455,6 +493,7 @@ def main():
     test_zero_policy_and_empty_mask()
     test_uniformity()
     test_source_control_flow_and_logging()
+    test_runtime_seed_plumbing()
     print("PASS S2 RELOCATED COMPLETE SMOKE")
 
 
