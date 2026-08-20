@@ -89,29 +89,67 @@ def create_hf_bundle(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        manifest_path = tmp / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, default=str))
+
+        # Canonical manifest nằm trong save_path.
+        # Temporary manifest chỉ dùng làm fallback nếu canonical file chưa tồn tại.
+        canonical_manifest = save_dir / "manifest.json"
+
+        if canonical_manifest.exists():
+            manifest_source = canonical_manifest
+        else:
+            fallback_manifest = tmp / "manifest.json"
+            fallback_manifest.write_text(
+                json.dumps(
+                    manifest,
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
+            manifest_source = fallback_manifest
 
         with tarfile.open(bundle_path, "w:gz") as tar:
-            tar.add(manifest_path, arcname="manifest.json")
-
+            # Config snapshot dùng đúng config của experiment.
             config_path = Path(config_path)
             if config_path.exists():
-                tar.add(config_path, arcname="config.yaml")
+                tar.add(
+                    config_path,
+                    arcname="config.yaml",
+                )
 
+            # Canonical experiment state.
             for name in [
                 "run_id.txt",
                 "ckpt.pth",
                 "ckpt_best.pth",
                 "epoch_metrics.csv",
                 "iter_metrics.csv",
-                "manifest.json",
             ]:
-                _add_if_exists(tar, save_dir / name, arcname=name)
+                _add_if_exists(
+                    tar,
+                    save_dir / name,
+                    arcname=name,
+                )
 
-            # Add text logs in save_path root.
+            # Chỉ add manifest đúng một lần.
+            _add_if_exists(
+                tar,
+                manifest_source,
+                arcname="manifest.json",
+            )
+
+            # Add các text log khác nếu có.
+            # run_id.txt đã được add ở canonical state phía trên,
+            # nên phải bỏ qua để tránh duplicate.
             for txt in sorted(save_dir.glob("*.txt")):
-                _add_if_exists(tar, txt, arcname=txt.name)
+                if txt.name == "run_id.txt":
+                    continue
+
+                _add_if_exists(
+                    tar,
+                    txt,
+                    arcname=txt.name,
+                )
 
     return bundle_path
 

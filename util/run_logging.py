@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import shutil
 import subprocess
 import uuid
 from datetime import datetime
@@ -149,6 +150,31 @@ def trim_csv_rows_by_epoch(
         writer.writeheader()
         writer.writerows(kept)
 
+def migrate_legacy_csv_if_missing(
+    legacy_path: str | Path,
+    canonical_path: str | Path,
+) -> bool:
+    """
+    Copy legacy iter CSV sang canonical iter_metrics.csv một lần.
+
+    Quy tắc:
+    - Nếu canonical file đã tồn tại và có dữ liệu -> giữ canonical, không đụng vào.
+    - Nếu legacy file không tồn tại hoặc rỗng -> không làm gì.
+    - Chỉ copy khi canonical chưa có nhưng legacy còn tồn tại.
+    """
+    legacy_path = Path(legacy_path)
+    canonical_path = Path(canonical_path)
+
+    if canonical_path.exists() and canonical_path.stat().st_size > 0:
+        return False
+
+    if not legacy_path.exists() or legacy_path.stat().st_size == 0:
+        return False
+
+    ensure_dir(canonical_path.parent)
+    shutil.copy2(legacy_path, canonical_path)
+
+    return True
 
 def write_json(path: str | Path, obj: Dict[str, Any]) -> None:
     path = Path(path)

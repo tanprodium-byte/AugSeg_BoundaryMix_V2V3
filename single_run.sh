@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 set -e
 
-tport=53907
-ngpu=${NPROC_PER_NODE:-1}
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-CONFIG=${CONFIG:-"$ROOT/exps/boundary_mix_v2_v3/voc_semi662/s1_saliency_box_cutmix/config.yaml"}
+ENV_FILE="/home/jupyter-iec2024iot04/.secrets/augseg_scheduler.env"
 
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-
-echo "CONFIG=${CONFIG}"
-echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "python=$(command -v python)"
-python - <<'PY'
-import torch
-print(f"torch={torch.__version__}")
-print(f"cuda_available={torch.cuda.is_available()}")
-PY
-
-if command -v torchrun >/dev/null 2>&1; then
-  launcher=(torchrun)
-else
-  launcher=(python -m torch.distributed.run)
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Missing environment file: $ENV_FILE" >&2
+  exit 1
 fi
 
-"${launcher[@]}" --standalone --nproc_per_node="${ngpu}" --master_port="${tport}" \
-  "$ROOT/train_semi.py" \
-  --config="${CONFIG}" \
-  --seed 2 --port "${tport}"
+set -a
+source "$ENV_FILE"
+set +a
+
+cd "$(dirname "$0")"
+
+PORT=${PORT:-53947}
+CONFIG="exps/boundary_mix_v2_v3/voc_semi662/c4_csl_official_direct_labeled_guided_cutmix_plus_ce_weight/config.yaml"
+
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
+conda run --no-capture-output -n augseg-bm \
+python -m torch.distributed.run \
+  --standalone \
+  --nproc_per_node=1 \
+  --master_port="$PORT" \
+  train_semi.py \
+  --config="$CONFIG" \
+  --seed 2 \
+  --port "$PORT"

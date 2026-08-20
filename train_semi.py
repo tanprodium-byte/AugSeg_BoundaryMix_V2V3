@@ -50,6 +50,7 @@ from util.run_logging import (
     get_or_create_run_id,
     append_csv_row,
     trim_csv_rows_by_epoch,
+    migrate_legacy_csv_if_missing,
     default_log_paths,
     get_git_commit,
     write_json,
@@ -774,12 +775,20 @@ def main(in_args):
     run_id_list = [run_id]
     dist.broadcast_object_list(run_id_list, src=0)
     run_id = run_id_list[0]
+
+    # Canonical run-state paths inside save_path.
     log_paths = default_log_paths(cfg["save_path"])
 
-    # dùng run_id để đặt tên CSV
     if rank == 0:
-        csv_path = os.path.join(cfg["log_path"], f"seg_{run_id}_stat.csv")
-        train_iter_csv = os.path.join(cfg["log_path"], f"train_iter_{run_id}.csv")
+        # Legacy epoch summary vẫn giữ nguyên ở log_path.
+        csv_path = os.path.join(
+            cfg["log_path"],
+            f"seg_{run_id}_stat.csv",
+        )
+
+        # Detailed iteration diagnostics giờ dùng canonical path:
+        # save_path/iter_metrics.csv
+        train_iter_csv = str(log_paths["iter_csv"])
     else:
         csv_path = None
         train_iter_csv = None
@@ -907,6 +916,7 @@ def main(in_args):
     best_epoch = -1
     best_prec_stu = 0
     best_epoch_stu = -1
+
     # auto_resume > pretrain
     last_epoch, best_prec, ckpt_run_id, ckpt_path = load_checkpoint_if_available(
         save_path=cfg["save_path"],
@@ -918,21 +928,70 @@ def main(in_args):
         map_location="cuda:%d" % local_rank,
         strict=True,
     )
+
     if ckpt_run_id:
         run_id = ckpt_run_id
+
         if rank == 0:
-            with open(os.path.join(cfg["save_path"], "run_id.txt"), "w") as f:
+            with open(
+                os.path.join(cfg["save_path"], "run_id.txt"),
+                "w",
+                encoding="utf-8",
+            ) as f:
                 f.write(str(run_id) + "\n")
-            csv_path = os.path.join(cfg["log_path"], f"seg_{run_id}_stat.csv")
-            train_iter_csv = os.path.join(cfg["log_path"], f"train_iter_{run_id}.csv")
+
+            # Legacy epoch-summary filename vẫn phụ thuộc run_id.
+            csv_path = os.path.join(
+                cfg["log_path"],
+                f"seg_{run_id}_stat.csv",
+            )
+
+            # Không đổi train_iter_csv ở đây.
+            # Nó luôn là save_path/iter_metrics.csv.
 
     if rank == 0 and ckpt_path is not None:
-        logger.info("Resumed checkpoint from %s, start_epoch=%d, best_miou=%.4f" %
-                    (str(ckpt_path), last_epoch, best_prec))
-        trim_iter_csv_for_resume(train_iter_csv, last_epoch, logger)
-        trim_csv_rows_by_epoch(csv_path, keep_epoch_lt=last_epoch)
-        trim_csv_rows_by_epoch(log_paths["epoch_csv"], keep_epoch_lt=last_epoch)
-        trim_csv_rows_by_epoch(log_paths["iter_csv"], keep_epoch_lt=last_epoch)
+        logger.info(
+            "Resumed checkpoint from %s, start_epoch=%d, best_miou=%.4f"
+            % (str(ckpt_path), last_epoch, best_prec)
+        )
+
+        # Các run cũ từng lưu detailed diagnostics ở:
+        # log_path/train_iter_<run_id>.csv
+        legacy_train_iter_csv = os.path.join(
+            cfg["log_path"],
+            f"train_iter_{run_id}.csv",
+        )
+
+        # Chỉ migrate khi iter_metrics.csv chưa tồn tại.
+        if migrate_legacy_csv_if_missing(
+            legacy_train_iter_csv,
+            train_iter_csv,
+        ):
+            logger.info(
+                "[log-migrate] copied legacy iter CSV %s -> %s",
+                legacy_train_iter_csv,
+                train_iter_csv,
+            )
+
+        # Nếu lần trước crash giữa epoch N thì checkpoint vẫn yêu cầu
+        # resume từ epoch N. Xóa diagnostics dở dang của epoch N trở đi.
+        trim_iter_csv_for_resume(
+            train_iter_csv,
+            last_epoch,
+            logger,
+        )
+
+        # Legacy epoch summary.
+        trim_csv_rows_by_epoch(
+            csv_path,
+            keep_epoch_lt=last_epoch,
+        )
+
+        # Canonical epoch-level history.
+        trim_csv_rows_by_epoch(
+            log_paths["epoch_csv"],
+            keep_epoch_lt=last_epoch,
+        )
 
     dist.barrier(device_ids=[local_rank])
 
