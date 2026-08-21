@@ -45,6 +45,15 @@ from util.saliency_cutmix import (
     get_saliency_component_guided_masks,
     get_saliency_guided_boxes,
 )
+from util.u1_saliency_u2u import (
+    NUM_CANDIDATES as U1_NUM_CANDIDATES,
+    TEMPERATURE as U1_TEMPERATURE,
+    U1Diagnostics,
+    U1_RNG_POLICY_VERSION,
+    aggregate_diagnostics as aggregate_u1_diagnostics,
+    apply_u1_saliency_u2u,
+    synchronized_failure_check as u1_synchronized_failure_check,
+)
 from tools.visualize_boundary_mix_debug import save_boundary_mix_debug
 from util.run_logging import (
     get_or_create_run_id,
@@ -79,6 +88,20 @@ AA_OPS = {
     10: "solarize",
     11: "hue",
 }
+
+
+def select_unlabeled_mix_branch(u1_enabled, use_cutmix, trigger_prob):
+    """Select U1 or the unchanged legacy CutMix trigger path.
+
+    Keeping this boundary small makes the disabled-path RNG contract directly
+    testable: U1 consumes no legacy trigger draw, while disabled U1 consumes the
+    same single global NumPy draw as the pre-U1 path.
+    """
+    if u1_enabled:
+        return "u1", 1, 1
+    rnd = np.random.uniform(0, 1)
+    triggered = int(rnd < trigger_prob)
+    return "legacy", triggered, int(triggered and use_cutmix)
 
 def aa_strength(k_id: int, t: float) -> float:
     """
@@ -691,6 +714,13 @@ def main(in_args):
     cfg["saliency_cutmix"].setdefault("debug_log", False)
     cfg["saliency_cutmix"].setdefault("eps", 1e-6)
 
+    cfg.setdefault("u1_saliency_u2u", {})
+    cfg["u1_saliency_u2u"].setdefault("enabled", False)
+    cfg["u1_saliency_u2u"].setdefault("num_candidates", U1_NUM_CANDIDATES)
+    cfg["u1_saliency_u2u"].setdefault("temperature", U1_TEMPERATURE)
+    cfg["u1_saliency_u2u"].setdefault("rng_policy", U1_RNG_POLICY_VERSION)
+    cfg["u1_saliency_u2u"].setdefault("debug_log", True)
+
     cfg.setdefault("csl", {})
     cfg["csl"].setdefault("enabled", False)
     cfg["csl"].setdefault("mode", "disabled")
@@ -1286,6 +1316,9 @@ def train(
     saliency_cutmix_cfg = cfg.get("saliency_cutmix", {})
     saliency_cutmix_enabled = bool(saliency_cutmix_cfg.get("enabled", False))
     saliency_cutmix_debug_enabled = bool(saliency_cutmix_cfg.get("debug_log", False))
+    u1_cfg = cfg.get("u1_saliency_u2u", {})
+    u1_enabled = bool(u1_cfg.get("enabled", False))
+    u1_debug_enabled = bool(u1_cfg.get("debug_log", True))
     s2_relocated_policy_active = (
         saliency_cutmix_cfg.get("direct_paste_policy")
         == "component_mask_random_valid_destination"
@@ -1389,6 +1422,28 @@ def train(
                 "perturbation, BoundaryMix, component, BCR, C3, and C4 paths disabled"
             )
     csl_cutmix_debug_enabled = bool(csl_cutmix_cfg.get("debug_log", False))
+    if u1_enabled:
+        crop_size = cfg.get("dataset", {}).get("train", {}).get("crop", {}).get("size")
+        incompatible = {
+            "saliency_cutmix": saliency_cutmix_enabled,
+            "fixed_size_csl_destination": fixed_size_csl_destination_enabled,
+            "csl": csl_enabled,
+            "csl_cutmix": csl_cutmix_enabled,
+            "boundary_mix": boundary_mix_enabled,
+            "boundary_component": boundary_component_enabled,
+            "boundary_compatibility": boundary_compatibility_enabled,
+        }
+        active_incompatible = [name for name, active in incompatible.items() if active]
+        if active_incompatible:
+            raise ValueError("U1 is isolated and incompatible with: %s" % ", ".join(active_incompatible))
+        if list(crop_size or []) != [321, 321]:
+            raise ValueError("U1 Phase B supports crop [321,321] only")
+        if int(u1_cfg.get("num_candidates")) != U1_NUM_CANDIDATES:
+            raise ValueError("U1 requires exactly eight candidates")
+        if float(u1_cfg.get("temperature")) != U1_TEMPERATURE:
+            raise ValueError("U1 requires temperature 0.2")
+        if u1_cfg.get("rng_policy") != U1_RNG_POLICY_VERSION:
+            raise ValueError("U1 requires rng_policy=u1_rng_policy_v1")
     model.train()
     
     # data loader
@@ -1413,6 +1468,7 @@ def train(
     # start iterations
     model.train()
     model_teacher.eval()
+    u1_diagnostics_accumulator = U1Diagnostics()
     for step in range(len(loader_l)):
         batch_start = time.time()
         # --------- init per-iter stats for wandb (tránh dính iter trước) ---------
@@ -1579,9 +1635,9 @@ def train(
             use_cutmix = cfg["trainer"]["unsupervised"].get("use_cutmix", False)
             trigger_prob = cfg["trainer"]["unsupervised"].get("use_cutmix_trigger_prob", 1.0)
 
-            rnd = np.random.uniform(0, 1)
-            ar_triggered = int(rnd < trigger_prob)
-            ar_applied = int(ar_triggered and use_cutmix)
+            mix_branch, ar_triggered, ar_applied = select_unlabeled_mix_branch(
+                u1_enabled, use_cutmix, trigger_prob
+            )
 
             mix_source_mask = None
             target_component_label = None
@@ -1595,6 +1651,20 @@ def train(
                 saliency_labeled_boxes = None
                 saliency_labeled_masks = None
                 csl_target_boxes = None
+                if mix_branch == "u1":
+                    image_u_aug, label_u_aug, logits_u_aug, u1_step_diagnostics = apply_u1_saliency_u2u(
+                        teacher=model_teacher,
+                        weak_rgb=image_u_weak,
+                        strong_rgb=image_u_aug,
+                        hard_pseudo=label_u_aug.detach(),
+                        confidence=logits_u_aug.detach(),
+                        base_seed=runtime_seed,
+                        rank=rank,
+                        epoch=epoch,
+                        step=step,
+                        absolute_global_iteration=i_iter,
+                    )
+                    u1_diagnostics_accumulator.add_(u1_step_diagnostics)
                 if saliency_cutmix_enabled:
                     try:
                         saliency_mode = saliency_cutmix_cfg.get("mode", "box")
@@ -1695,7 +1765,10 @@ def train(
                                 % (epoch, step, i_iter, str(exc))
                             )
 
-                if (
+                if mix_branch == "u1":
+                    # U1 already produced aligned strong RGB/pseudo/confidence tensors.
+                    pass
+                elif (
                     boundary_mix_enabled
                     or boundary_component_enabled
                     or boundary_compatibility_enabled
@@ -1848,6 +1921,22 @@ def train(
                         image_u_aug, label_u_aug, logits_u_aug,
                         image_l, label_l, confidence
                     )
+
+                u1_log_boundary = (i_iter % log_every == 0) or (step == len(loader_l) - 1)
+                if u1_enabled and u1_log_boundary:
+                    u1_aggregated = aggregate_u1_diagnostics(
+                        u1_diagnostics_accumulator,
+                        device=image_u_aug.device,
+                    )
+                    if rank == 0 and u1_debug_enabled:
+                        logger.info(
+                            "[u1_saliency_u2u] epoch=%d step=%d global_iter=%d %s",
+                            epoch,
+                            step,
+                            i_iter,
+                            " ".join("%s=%s" % (key, value) for key, value in sorted(u1_aggregated.items())),
+                        )
+                    u1_diagnostics_accumulator.reset_()
 
                 if label_u_before is not None:
                     ar_area_ratio_est = (label_u_aug != label_u_before).float().mean().item()
@@ -2292,6 +2381,16 @@ def train(
         loss = sup_loss + unsup_loss
         if bcr_loss is not None:
             loss = loss + boundary_compatibility_lambda * bcr_loss
+        if u1_enabled:
+            u1_synchronized_failure_check(
+                not bool(torch.isfinite(loss).item()),
+                "nonfinite_integrated_student_loss",
+                device=loss.device,
+                rank=rank,
+                epoch=epoch,
+                step=step,
+                iteration=i_iter,
+            )
 
         # update student model
         optimizer.zero_grad()
