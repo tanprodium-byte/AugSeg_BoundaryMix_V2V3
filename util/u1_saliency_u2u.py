@@ -42,11 +42,17 @@ class U1Diagnostics:
     nonempty_paste_attempts: int = 0
     near_flat_images: int = 0
     derangement_attempts: int = 0
+    u3_total_probe_pixels: int = 0
+    u3_confidence_valid_probe_pixels: int = 0
+    u3_ignored_label_pixels: int = 0
+    u3_zero_valid_donors: int = 0
+    u3_all_valid_donors: int = 0
+    u3_finite_probe_events: int = 0
 
     def as_dict(self) -> Dict[str, int | float | str]:
         paste_rate = self.paste_attempts / max(self.total_receivers, 1)
         mixed_rate = self.nonempty_paste_attempts / max(self.total_receivers, 1)
-        return {
+        values = {
             "u1/total_receivers": self.total_receivers,
             "u1/total_candidate_draws": self.total_candidate_draws,
             "u1/generated_invalid_candidates": self.generated_invalid_candidates,
@@ -60,6 +66,20 @@ class U1Diagnostics:
             "u1/derangement_attempts": self.derangement_attempts,
             "u1/rng_policy": U1_RNG_POLICY_VERSION,
         }
+        if self.u3_total_probe_pixels:
+            donor_count = max(self.total_receivers, 1)
+            values.update({
+                "u3/total_probe_pixels": self.u3_total_probe_pixels,
+                "u3/confidence_valid_probe_pixels": self.u3_confidence_valid_probe_pixels,
+                "u3/ignored_label_pixels": self.u3_ignored_label_pixels,
+                "u3/zero_valid_donors": self.u3_zero_valid_donors,
+                "u3/zero_valid_donor_rate": self.u3_zero_valid_donors / donor_count,
+                "u3/all_valid_donors": self.u3_all_valid_donors,
+                "u3/all_valid_donor_rate": self.u3_all_valid_donors / donor_count,
+                "u3/finite_probe_events": self.u3_finite_probe_events,
+                "u3/near_flat_donor_rate": self.near_flat_images / donor_count,
+            })
+        return values
 
     def add_(self, other: "U1Diagnostics") -> None:
         for name in self.__dataclass_fields__:
@@ -206,6 +226,11 @@ def compute_self_pseudo_saliency(
     teacher: torch.nn.Module,
     donor_weak: torch.Tensor,
     donor_pseudo: torch.Tensor,
+    *,
+    donor_confidence: torch.Tensor | None = None,
+    confidence_threshold: float | None = None,
+    ignore_label: int | None = None,
+    probe_statistics: Dict[str, int] | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return detached normalized saliency, near-flat flags, and probe loss."""
     probe_model = teacher.module if hasattr(teacher, "module") else teacher
@@ -219,7 +244,38 @@ def compute_self_pseudo_saliency(
     probe_logits = _teacher_logits(teacher, probe_input)
     if probe_logits.shape[0] != detached_target.shape[0] or probe_logits.shape[2:] != detached_target.shape[1:]:
         raise ValueError("CONFLICT — PROBE LOGIT/TARGET SPATIAL RESOLUTION MISMATCH")
-    probe_loss = F.cross_entropy(probe_logits, detached_target, reduction="mean")
+    confidence_filtered = donor_confidence is not None
+    if confidence_filtered != (confidence_threshold is not None and ignore_label is not None):
+        raise ValueError("U3 confidence, threshold, and ignore label must be supplied together")
+    if confidence_filtered:
+        detached_confidence = donor_confidence.detach()
+        if detached_confidence.shape != detached_target.shape or detached_confidence.device != detached_target.device:
+            raise ValueError("CONFLICT — U3 CONFIDENCE/TARGET ALIGNMENT MISMATCH")
+        ce_map = F.cross_entropy(
+            probe_logits,
+            detached_target,
+            reduction="none",
+            ignore_index=int(ignore_label),
+        )
+        confidence_mask = detached_confidence.ge(float(confidence_threshold))
+        ignore_mask = detached_target.ne(int(ignore_label))
+        mask = confidence_mask & ignore_mask
+        masked_sum = (ce_map * mask.to(dtype=ce_map.dtype)).flatten(1).sum(dim=1)
+        valid_count = mask.flatten(1).sum(dim=1)
+        safe_denominator = valid_count.clamp_min(1).to(dtype=ce_map.dtype)
+        per_image_loss = masked_sum / safe_denominator
+        probe_loss = per_image_loss.sum() / probe_logits.shape[0]
+        if probe_statistics is not None:
+            pixels_per_donor = int(detached_target[0].numel())
+            probe_statistics.update({
+                "total_probe_pixels": int(detached_target.numel()),
+                "confidence_valid_probe_pixels": int(mask.sum().item()),
+                "ignored_label_pixels": int((~ignore_mask).sum().item()),
+                "zero_valid_donors": int((valid_count == 0).sum().item()),
+                "all_valid_donors": int((valid_count == pixels_per_donor).sum().item()),
+            })
+    else:
+        probe_loss = F.cross_entropy(probe_logits, detached_target, reduction="mean")
     (input_grad,) = torch.autograd.grad(
         outputs=probe_loss,
         inputs=(probe_input,),
@@ -305,6 +361,9 @@ def apply_u1_saliency_u2u(
     step: int,
     absolute_global_iteration: int,
     saliency_probe_rgb: torch.Tensor | None = None,
+    confidence_filtered_probe: bool = False,
+    confidence_threshold: float | None = None,
+    ignore_label: int | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, U1Diagnostics]:
     """Apply the common U1/U2 mixing pipeline to every local receiver.
 
@@ -327,6 +386,7 @@ def apply_u1_saliency_u2u(
         or confidence.device != device
         or (saliency_probe_rgb is not None and saliency_probe_rgb.shape != weak_rgb.shape)
         or (saliency_probe_rgb is not None and saliency_probe_rgb.device != device)
+        or (confidence_filtered_probe and (saliency_probe_rgb is None or confidence_threshold is None or ignore_label is None))
     )
     synchronized_failure_check(
         local_structural_failure,
@@ -366,10 +426,19 @@ def apply_u1_saliency_u2u(
     donor_probe = probe_rgb[permutation].detach()
     donor_pseudo = hard_pseudo[permutation].detach()
     donor_confidence = confidence[permutation].detach()
+    probe_statistics: Dict[str, int] = {}
     probe_detail = ""
     try:
+        probe_kwargs = {}
+        if confidence_filtered_probe:
+            probe_kwargs = {
+                "donor_confidence": donor_confidence,
+                "confidence_threshold": confidence_threshold,
+                "ignore_label": ignore_label,
+                "probe_statistics": probe_statistics,
+            }
         normalized_saliency, near_flat, probe_loss, raw_saliency_finite = compute_self_pseudo_saliency(
-            teacher, donor_probe, donor_pseudo
+            teacher, donor_probe, donor_pseudo, **probe_kwargs
         )
         probe_structural_failure = False
     except (RuntimeError, ValueError) as exc:
@@ -450,6 +519,12 @@ def apply_u1_saliency_u2u(
         nonempty_paste_attempts=int(nonempty.sum().item()),
         near_flat_images=int(near_flat.sum().item()),
         derangement_attempts=attempts,
+        u3_total_probe_pixels=probe_statistics.get("total_probe_pixels", 0),
+        u3_confidence_valid_probe_pixels=probe_statistics.get("confidence_valid_probe_pixels", 0),
+        u3_ignored_label_pixels=probe_statistics.get("ignored_label_pixels", 0),
+        u3_zero_valid_donors=probe_statistics.get("zero_valid_donors", 0),
+        u3_all_valid_donors=probe_statistics.get("all_valid_donors", 0),
+        u3_finite_probe_events=int(confidence_filtered_probe),
     )
     return mixed_rgb, mixed_pseudo, mixed_confidence, diagnostics
 
