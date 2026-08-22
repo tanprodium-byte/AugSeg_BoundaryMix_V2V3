@@ -304,8 +304,13 @@ def apply_u1_saliency_u2u(
     epoch: int,
     step: int,
     absolute_global_iteration: int,
+    saliency_probe_rgb: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, U1Diagnostics]:
-    """Apply one U1 mixing operation to every local receiver."""
+    """Apply the common U1/U2 mixing pipeline to every local receiver.
+
+    U1 keeps the default weak-view probe. U2 explicitly supplies the existing
+    pre-mix intensity-augmented view; all other inputs and decisions are shared.
+    """
     device = weak_rgb.device
     shape_ok = weak_rgb.dim() == 4
     batch = int(weak_rgb.size(0)) if weak_rgb.dim() >= 1 else 0
@@ -320,6 +325,8 @@ def apply_u1_saliency_u2u(
         or strong_rgb.device != device
         or hard_pseudo.device != device
         or confidence.device != device
+        or (saliency_probe_rgb is not None and saliency_probe_rgb.shape != weak_rgb.shape)
+        or (saliency_probe_rgb is not None and saliency_probe_rgb.device != device)
     )
     synchronized_failure_check(
         local_structural_failure,
@@ -355,12 +362,14 @@ def apply_u1_saliency_u2u(
     assert permutation is not None
 
     donor_weak = weak_rgb[permutation].detach()
+    probe_rgb = weak_rgb if saliency_probe_rgb is None else saliency_probe_rgb
+    donor_probe = probe_rgb[permutation].detach()
     donor_pseudo = hard_pseudo[permutation].detach()
     donor_confidence = confidence[permutation].detach()
     probe_detail = ""
     try:
         normalized_saliency, near_flat, probe_loss, raw_saliency_finite = compute_self_pseudo_saliency(
-            teacher, donor_weak, donor_pseudo
+            teacher, donor_probe, donor_pseudo
         )
         probe_structural_failure = False
     except (RuntimeError, ValueError) as exc:

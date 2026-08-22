@@ -90,15 +90,19 @@ AA_OPS = {
 }
 
 
-def select_unlabeled_mix_branch(u1_enabled, use_cutmix, trigger_prob):
+def select_unlabeled_mix_branch(u1_enabled, use_cutmix, trigger_prob, u2_enabled=False):
     """Select U1 or the unchanged legacy CutMix trigger path.
 
     Keeping this boundary small makes the disabled-path RNG contract directly
     testable: U1 consumes no legacy trigger draw, while disabled U1 consumes the
     same single global NumPy draw as the pre-U1 path.
     """
+    if u1_enabled and u2_enabled:
+        raise ValueError("U1 and U2 cannot be enabled simultaneously")
     if u1_enabled:
         return "u1", 1, 1
+    if u2_enabled:
+        return "u2", 1, 1
     rnd = np.random.uniform(0, 1)
     triggered = int(rnd < trigger_prob)
     return "legacy", triggered, int(triggered and use_cutmix)
@@ -721,6 +725,13 @@ def main(in_args):
     cfg["u1_saliency_u2u"].setdefault("rng_policy", U1_RNG_POLICY_VERSION)
     cfg["u1_saliency_u2u"].setdefault("debug_log", True)
 
+    cfg.setdefault("u2_cross_view_saliency_u2u", {})
+    cfg["u2_cross_view_saliency_u2u"].setdefault("enabled", False)
+    cfg["u2_cross_view_saliency_u2u"].setdefault("num_candidates", U1_NUM_CANDIDATES)
+    cfg["u2_cross_view_saliency_u2u"].setdefault("temperature", U1_TEMPERATURE)
+    cfg["u2_cross_view_saliency_u2u"].setdefault("rng_policy", U1_RNG_POLICY_VERSION)
+    cfg["u2_cross_view_saliency_u2u"].setdefault("debug_log", True)
+
     cfg.setdefault("csl", {})
     cfg["csl"].setdefault("enabled", False)
     cfg["csl"].setdefault("mode", "disabled")
@@ -1319,6 +1330,9 @@ def train(
     u1_cfg = cfg.get("u1_saliency_u2u", {})
     u1_enabled = bool(u1_cfg.get("enabled", False))
     u1_debug_enabled = bool(u1_cfg.get("debug_log", True))
+    u2_cfg = cfg.get("u2_cross_view_saliency_u2u", {})
+    u2_enabled = bool(u2_cfg.get("enabled", False))
+    u2_debug_enabled = bool(u2_cfg.get("debug_log", True))
     s2_relocated_policy_active = (
         saliency_cutmix_cfg.get("direct_paste_policy")
         == "component_mask_random_valid_destination"
@@ -1422,7 +1436,11 @@ def train(
                 "perturbation, BoundaryMix, component, BCR, C3, and C4 paths disabled"
             )
     csl_cutmix_debug_enabled = bool(csl_cutmix_cfg.get("debug_log", False))
-    if u1_enabled:
+    if u1_enabled and u2_enabled:
+        raise ValueError("U1 and U2 cannot be enabled simultaneously")
+    if u1_enabled or u2_enabled:
+        method_name = "U1" if u1_enabled else "U2"
+        method_cfg = u1_cfg if u1_enabled else u2_cfg
         crop_size = cfg.get("dataset", {}).get("train", {}).get("crop", {}).get("size")
         incompatible = {
             "saliency_cutmix": saliency_cutmix_enabled,
@@ -1435,15 +1453,15 @@ def train(
         }
         active_incompatible = [name for name, active in incompatible.items() if active]
         if active_incompatible:
-            raise ValueError("U1 is isolated and incompatible with: %s" % ", ".join(active_incompatible))
+            raise ValueError("%s is isolated and incompatible with: %s" % (method_name, ", ".join(active_incompatible)))
         if list(crop_size or []) != [321, 321]:
-            raise ValueError("U1 Phase B supports crop [321,321] only")
-        if int(u1_cfg.get("num_candidates")) != U1_NUM_CANDIDATES:
-            raise ValueError("U1 requires exactly eight candidates")
-        if float(u1_cfg.get("temperature")) != U1_TEMPERATURE:
-            raise ValueError("U1 requires temperature 0.2")
-        if u1_cfg.get("rng_policy") != U1_RNG_POLICY_VERSION:
-            raise ValueError("U1 requires rng_policy=u1_rng_policy_v1")
+            raise ValueError("%s Phase B supports crop [321,321] only" % method_name)
+        if int(method_cfg.get("num_candidates")) != U1_NUM_CANDIDATES:
+            raise ValueError("%s requires exactly eight candidates" % method_name)
+        if float(method_cfg.get("temperature")) != U1_TEMPERATURE:
+            raise ValueError("%s requires temperature 0.2" % method_name)
+        if method_cfg.get("rng_policy") != U1_RNG_POLICY_VERSION:
+            raise ValueError("%s requires rng_policy=u1_rng_policy_v1" % method_name)
     model.train()
     
     # data loader
@@ -1636,7 +1654,7 @@ def train(
             trigger_prob = cfg["trainer"]["unsupervised"].get("use_cutmix_trigger_prob", 1.0)
 
             mix_branch, ar_triggered, ar_applied = select_unlabeled_mix_branch(
-                u1_enabled, use_cutmix, trigger_prob
+                u1_enabled, use_cutmix, trigger_prob, u2_enabled=u2_enabled
             )
 
             mix_source_mask = None
@@ -1651,7 +1669,7 @@ def train(
                 saliency_labeled_boxes = None
                 saliency_labeled_masks = None
                 csl_target_boxes = None
-                if mix_branch == "u1":
+                if mix_branch in ("u1", "u2"):
                     image_u_aug, label_u_aug, logits_u_aug, u1_step_diagnostics = apply_u1_saliency_u2u(
                         teacher=model_teacher,
                         weak_rgb=image_u_weak,
@@ -1663,6 +1681,7 @@ def train(
                         epoch=epoch,
                         step=step,
                         absolute_global_iteration=i_iter,
+                        saliency_probe_rgb=image_u_aug if mix_branch == "u2" else None,
                     )
                     u1_diagnostics_accumulator.add_(u1_step_diagnostics)
                 if saliency_cutmix_enabled:
@@ -1923,14 +1942,15 @@ def train(
                     )
 
                 u1_log_boundary = (i_iter % log_every == 0) or (step == len(loader_l) - 1)
-                if u1_enabled and u1_log_boundary:
+                if (u1_enabled or u2_enabled) and u1_log_boundary:
                     u1_aggregated = aggregate_u1_diagnostics(
                         u1_diagnostics_accumulator,
                         device=image_u_aug.device,
                     )
-                    if rank == 0 and u1_debug_enabled:
+                    if rank == 0 and (u1_debug_enabled if u1_enabled else u2_debug_enabled):
                         logger.info(
-                            "[u1_saliency_u2u] epoch=%d step=%d global_iter=%d %s",
+                            "[%s] epoch=%d step=%d global_iter=%d %s",
+                            "u1_saliency_u2u" if u1_enabled else "u2_cross_view_saliency_u2u",
                             epoch,
                             step,
                             i_iter,
@@ -2381,7 +2401,7 @@ def train(
         loss = sup_loss + unsup_loss
         if bcr_loss is not None:
             loss = loss + boundary_compatibility_lambda * bcr_loss
-        if u1_enabled:
+        if u1_enabled or u2_enabled:
             u1_synchronized_failure_check(
                 not bool(torch.isfinite(loss).item()),
                 "nonfinite_integrated_student_loss",
