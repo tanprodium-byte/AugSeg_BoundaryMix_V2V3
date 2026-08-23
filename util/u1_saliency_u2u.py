@@ -386,7 +386,7 @@ def apply_u1_saliency_u2u(
         or confidence.device != device
         or (saliency_probe_rgb is not None and saliency_probe_rgb.shape != weak_rgb.shape)
         or (saliency_probe_rgb is not None and saliency_probe_rgb.device != device)
-        or (confidence_filtered_probe and (saliency_probe_rgb is None or confidence_threshold is None or ignore_label is None))
+        or (confidence_filtered_probe and (confidence_threshold is None or ignore_label is None))
     )
     synchronized_failure_check(
         local_structural_failure,

@@ -90,21 +90,25 @@ AA_OPS = {
 }
 
 
-def select_unlabeled_mix_branch(u1_enabled, use_cutmix, trigger_prob, u2_enabled=False, u3_enabled=False):
+def select_unlabeled_mix_branch(
+    u1_enabled, use_cutmix, trigger_prob, u2_enabled=False, u3_enabled=False, u4_enabled=False
+):
     """Select U1 or the unchanged legacy CutMix trigger path.
 
     Keeping this boundary small makes the disabled-path RNG contract directly
     testable: U1 consumes no legacy trigger draw, while disabled U1 consumes the
     same single global NumPy draw as the pre-U1 path.
     """
-    if sum(bool(enabled) for enabled in (u1_enabled, u2_enabled, u3_enabled)) > 1:
-        raise ValueError("U1, U2, and U3 cannot be enabled simultaneously")
+    if sum(bool(enabled) for enabled in (u1_enabled, u2_enabled, u3_enabled, u4_enabled)) > 1:
+        raise ValueError("U1, U2, U3, and U4 cannot be enabled simultaneously")
     if u1_enabled:
         return "u1", 1, 1
     if u2_enabled:
         return "u2", 1, 1
     if u3_enabled:
         return "u3", 1, 1
+    if u4_enabled:
+        return "u4", 1, 1
     rnd = np.random.uniform(0, 1)
     triggered = int(rnd < trigger_prob)
     return "legacy", triggered, int(triggered and use_cutmix)
@@ -741,6 +745,13 @@ def main(in_args):
     cfg["u3_confidence_filtered_cross_view_saliency_u2u"].setdefault("rng_policy", U1_RNG_POLICY_VERSION)
     cfg["u3_confidence_filtered_cross_view_saliency_u2u"].setdefault("debug_log", True)
 
+    cfg.setdefault("u4_confidence_filtered_self_pseudo_saliency_u2u", {})
+    cfg["u4_confidence_filtered_self_pseudo_saliency_u2u"].setdefault("enabled", False)
+    cfg["u4_confidence_filtered_self_pseudo_saliency_u2u"].setdefault("num_candidates", U1_NUM_CANDIDATES)
+    cfg["u4_confidence_filtered_self_pseudo_saliency_u2u"].setdefault("temperature", U1_TEMPERATURE)
+    cfg["u4_confidence_filtered_self_pseudo_saliency_u2u"].setdefault("rng_policy", U1_RNG_POLICY_VERSION)
+    cfg["u4_confidence_filtered_self_pseudo_saliency_u2u"].setdefault("debug_log", True)
+
     cfg.setdefault("csl", {})
     cfg["csl"].setdefault("enabled", False)
     cfg["csl"].setdefault("mode", "disabled")
@@ -1345,6 +1356,9 @@ def train(
     u3_cfg = cfg.get("u3_confidence_filtered_cross_view_saliency_u2u", {})
     u3_enabled = bool(u3_cfg.get("enabled", False))
     u3_debug_enabled = bool(u3_cfg.get("debug_log", True))
+    u4_cfg = cfg.get("u4_confidence_filtered_self_pseudo_saliency_u2u", {})
+    u4_enabled = bool(u4_cfg.get("enabled", False))
+    u4_debug_enabled = bool(u4_cfg.get("debug_log", True))
     s2_relocated_policy_active = (
         saliency_cutmix_cfg.get("direct_paste_policy")
         == "component_mask_random_valid_destination"
@@ -1448,11 +1462,11 @@ def train(
                 "perturbation, BoundaryMix, component, BCR, C3, and C4 paths disabled"
             )
     csl_cutmix_debug_enabled = bool(csl_cutmix_cfg.get("debug_log", False))
-    if sum(bool(enabled) for enabled in (u1_enabled, u2_enabled, u3_enabled)) > 1:
-        raise ValueError("U1, U2, and U3 cannot be enabled simultaneously")
-    if u1_enabled or u2_enabled or u3_enabled:
-        method_name = "U1" if u1_enabled else ("U2" if u2_enabled else "U3")
-        method_cfg = u1_cfg if u1_enabled else (u2_cfg if u2_enabled else u3_cfg)
+    if sum(bool(enabled) for enabled in (u1_enabled, u2_enabled, u3_enabled, u4_enabled)) > 1:
+        raise ValueError("U1, U2, U3, and U4 cannot be enabled simultaneously")
+    if u1_enabled or u2_enabled or u3_enabled or u4_enabled:
+        method_name = "U1" if u1_enabled else ("U2" if u2_enabled else ("U3" if u3_enabled else "U4"))
+        method_cfg = u1_cfg if u1_enabled else (u2_cfg if u2_enabled else (u3_cfg if u3_enabled else u4_cfg))
         crop_size = cfg.get("dataset", {}).get("train", {}).get("crop", {}).get("size")
         incompatible = {
             "saliency_cutmix": saliency_cutmix_enabled,
@@ -1666,7 +1680,8 @@ def train(
             trigger_prob = cfg["trainer"]["unsupervised"].get("use_cutmix_trigger_prob", 1.0)
 
             mix_branch, ar_triggered, ar_applied = select_unlabeled_mix_branch(
-                u1_enabled, use_cutmix, trigger_prob, u2_enabled=u2_enabled, u3_enabled=u3_enabled
+                u1_enabled, use_cutmix, trigger_prob, u2_enabled=u2_enabled,
+                u3_enabled=u3_enabled, u4_enabled=u4_enabled
             )
 
             mix_source_mask = None
@@ -1681,10 +1696,17 @@ def train(
                 saliency_labeled_boxes = None
                 saliency_labeled_masks = None
                 csl_target_boxes = None
-                if mix_branch in ("u1", "u2", "u3"):
+                if mix_branch in ("u1", "u2", "u3", "u4"):
                     saliency_probe_rgb=image_u_aug if mix_branch == "u2" else None
                     if mix_branch == "u3":
                         saliency_probe_rgb = image_u_aug
+                    confidence_filtered_probe = mix_branch == "u3"
+                    confidence_threshold=p_threshold if mix_branch == "u3" else None
+                    ignore_label=ignore if mix_branch == "u3" else None
+                    if mix_branch == "u4":
+                        confidence_filtered_probe = True
+                        confidence_threshold = p_threshold
+                        ignore_label = ignore
                     image_u_aug, label_u_aug, logits_u_aug, u1_step_diagnostics = apply_u1_saliency_u2u(
                         teacher=model_teacher,
                         weak_rgb=image_u_weak,
@@ -1697,9 +1719,9 @@ def train(
                         step=step,
                         absolute_global_iteration=i_iter,
                         saliency_probe_rgb=saliency_probe_rgb,
-                        confidence_filtered_probe=mix_branch == "u3",
-                        confidence_threshold=p_threshold if mix_branch == "u3" else None,
-                        ignore_label=ignore if mix_branch == "u3" else None,
+                        confidence_filtered_probe=confidence_filtered_probe,
+                        confidence_threshold=confidence_threshold,
+                        ignore_label=ignore_label,
                     )
                     u1_diagnostics_accumulator.add_(u1_step_diagnostics)
                 if saliency_cutmix_enabled:
@@ -1960,18 +1982,30 @@ def train(
                     )
 
                 u1_log_boundary = (i_iter % log_every == 0) or (step == len(loader_l) - 1)
-                if (u1_enabled or u2_enabled or u3_enabled) and u1_log_boundary:
+                if (u1_enabled or u2_enabled or u3_enabled or u4_enabled) and u1_log_boundary:
                     u1_aggregated = aggregate_u1_diagnostics(
                         u1_diagnostics_accumulator,
                         device=image_u_aug.device,
                     )
-                    method_debug_enabled = u1_debug_enabled if u1_enabled else (u2_debug_enabled if u2_enabled else u3_debug_enabled)
+                    if u4_enabled:
+                        u1_aggregated = {
+                            (key.replace("u3/", "u4/", 1) if key.startswith("u3/") else key): value
+                            for key, value in u1_aggregated.items()
+                        }
+                    method_debug_enabled = (
+                        u1_debug_enabled if u1_enabled else (
+                            u2_debug_enabled if u2_enabled else (u3_debug_enabled if u3_enabled else u4_debug_enabled)
+                        )
+                    )
                     if rank == 0 and method_debug_enabled:
                         logger.info(
                             "[%s] epoch=%d step=%d global_iter=%d %s",
                             "u1_saliency_u2u" if u1_enabled else (
                                 "u2_cross_view_saliency_u2u" if u2_enabled
-                                else "u3_confidence_filtered_cross_view_saliency_u2u"
+                                else (
+                                    "u3_confidence_filtered_cross_view_saliency_u2u" if u3_enabled
+                                    else "u4_confidence_filtered_self_pseudo_saliency_u2u"
+                                )
                             ),
                             epoch,
                             step,
@@ -2423,7 +2457,7 @@ def train(
         loss = sup_loss + unsup_loss
         if bcr_loss is not None:
             loss = loss + boundary_compatibility_lambda * bcr_loss
-        if u1_enabled or u2_enabled or u3_enabled:
+        if u1_enabled or u2_enabled or u3_enabled or u4_enabled:
             u1_synchronized_failure_check(
                 not bool(torch.isfinite(loss).item()),
                 "nonfinite_integrated_student_loss",
