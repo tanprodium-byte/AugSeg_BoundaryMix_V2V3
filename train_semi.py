@@ -113,6 +113,11 @@ def select_unlabeled_mix_branch(
     triggered = int(rnd < trigger_prob)
     return "legacy", triggered, int(triggered and use_cutmix)
 
+
+def is_u_saliency_mix_branch(mix_branch):
+    """Return whether the U1–U4 helper has completed the iteration's mixing."""
+    return mix_branch in ("u1", "u2", "u3", "u4")
+
 def aa_strength(k_id: int, t: float) -> float:
     """
     Chuẩn hoá intensity về [0,1] (0=nhẹ, 1=mạnh).
@@ -1696,7 +1701,7 @@ def train(
                 saliency_labeled_boxes = None
                 saliency_labeled_masks = None
                 csl_target_boxes = None
-                if mix_branch in ("u1", "u2", "u3", "u4"):
+                if is_u_saliency_mix_branch(mix_branch):
                     saliency_probe_rgb=image_u_aug if mix_branch == "u2" else None
                     if mix_branch == "u3":
                         saliency_probe_rgb = image_u_aug
@@ -1824,8 +1829,8 @@ def train(
                                 % (epoch, step, i_iter, str(exc))
                             )
 
-                if mix_branch == "u1":
-                    # U1 already produced aligned strong RGB/pseudo/confidence tensors.
+                if is_u_saliency_mix_branch(mix_branch):
+                    # U1–U4 already produced aligned strong RGB/pseudo/confidence tensors.
                     pass
                 elif (
                     boundary_mix_enabled
