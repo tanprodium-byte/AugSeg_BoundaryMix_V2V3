@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
 
-# Chỉ user hiện tại mới đọc được các file mới tạo.
-umask 077
+# Chạy U1–U4, tối đa 2 job trên cùng một GPU.
+# train_semi.py tự quản lý checkpoint, auto-resume, W&B và Hugging Face.
+
+set -uo pipefail
+shopt -s nullglob
 
 # ============================================================
-# CẤU HÌNH CHUNG
+# THAM SỐ CÓ THỂ CHỈNH
 # ============================================================
 
 ROOT="/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3"
@@ -14,246 +16,512 @@ ENV_FILE="/home/jupyter-iec2024iot04/.secrets/augseg_scheduler.env"
 CONDA_EXE="/opt/tljh/user/bin/conda"
 CONDA_ENV="augseg-bm"
 
-# ============================================================
-# CHỈ CẦN THÊM, XÓA HOẶC ĐỔI THỨ TỰ CONFIG Ở ĐÂY
-# ============================================================
+GPU="${GPU:-0}"
+SEED="${SEED:-2}"
+
+# Tối đa 2 training job đồng thời.
+MAX_JOBS="${MAX_JOBS:-2}"
+
+# Chỉ khởi chạy job mới khi còn ít nhất lượng VRAM này.
+MIN_FREE_VRAM_MIB="${MIN_FREE_VRAM_MIB:-10000}"
+
+# Kiểm tra lại GPU và trạng thái job mỗi 120 giây.
+POLL_SECONDS="${POLL_SECONDS:-120}"
+
+# Sau khi mở một job, chờ VRAM ổn định rồi mới xét job tiếp theo.
+LAUNCH_SETTLE_SECONDS="${LAUNCH_SETTLE_SECONDS:-120}"
+
+# Nếu OOM, chờ 300 giây trước khi chạy lại.
+OOM_RETRY_SECONDS="${OOM_RETRY_SECONDS:-300}"
+
+# Mỗi phương pháp dùng một port riêng.
+BASE_PORT="${BASE_PORT:-53947}"
 
 CONFIGS=(
-  "exps/boundary_mix_v2_v3/voc_semi662/baseline_augseg_fair80_c513_bs8/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/c4_csl_official_direct_labeled_adaptive_gate_guided_cutmix_plus_ce_weight_v1_c513_bs8/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/s1_saliency_box_adaptive_relocated_cutmix_c513_bs8/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/s2_saliency_component_mask_relocated_cutmix_c513_bs8/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/u1_self_pseudo_saliency_u2u_cutmix/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/u2_cross_view_saliency_u2u_cutmix/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/u3_confidence_filtered_cross_view_saliency_u2u_cutmix/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/u4_confidence_filtered_self_pseudo_saliency_u2u_cutmix/config.yaml"
+)
+
+METHODS=(
+  "u1_self_pseudo_saliency_u2u_cutmix"
+  "u2_cross_view_saliency_u2u_cutmix"
+  "u3_confidence_filtered_cross_view_saliency_u2u_cutmix"
+  "u4_confidence_filtered_self_pseudo_saliency_u2u_cutmix"
 )
 
 # ============================================================
-# KIỂM TRA CÁC ĐƯỜNG DẪN CƠ BẢN
+# HÀM CƠ BẢN
 # ============================================================
 
-if [[ ! -d "$ROOT" ]]; then
-  echo "[ERROR] Repository không tồn tại:" >&2
-  echo "$ROOT" >&2
+timestamp() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+log() {
+  printf '[%s] %s\n' "$(timestamp)" "$*"
+}
+
+die() {
+  log "ERROR: $*" >&2
   exit 1
-fi
-
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "[ERROR] Thiếu environment file:" >&2
-  echo "$ENV_FILE" >&2
-  exit 1
-fi
-
-if [[ ! -x "$CONDA_EXE" ]]; then
-  echo "[ERROR] Conda executable không tồn tại hoặc không có quyền chạy:" >&2
-  echo "$CONDA_EXE" >&2
-  exit 1
-fi
+}
 
 # ============================================================
-# NẠP BIẾN MÔI TRƯỜNG
+# KIỂM TRA ĐẦU VÀO
 # ============================================================
 
-set -a
-source "$ENV_FILE"
-set +a
+[[ -d "$ROOT/.git" ]] ||
+  die "Không tìm thấy repository: $ROOT"
 
-# Có thể ghi đè khi gọi script từ bên ngoài.
-#
-# Chạy bình thường:
-#   ./run_methods.sh
-#
-# Chạy GPU 1, seed 3:
-#   CUDA_VISIBLE_DEVICES=1 SEED=3 ./run_methods.sh
+[[ -x "$CONDA_EXE" ]] ||
+  die "Không tìm thấy Conda: $CONDA_EXE"
 
-GPU="${CUDA_VISIBLE_DEVICES:-0}"
-SEED="${SEED:-2}"
-BASE_PORT="${PORT:-53947}"
+command -v flock >/dev/null 2>&1 ||
+  die "Không tìm thấy lệnh flock"
 
-# ============================================================
-# THƯ MỤC TRẠNG THÁI VÀ LOG
-# ============================================================
+command -v nvidia-smi >/dev/null 2>&1 ||
+  die "Không tìm thấy lệnh nvidia-smi"
 
-STATE_DIR="$ROOT/.method_queue"
-DONE_DIR="$STATE_DIR/done"
+[[ "$MAX_JOBS" =~ ^[1-9][0-9]*$ ]] ||
+  die "MAX_JOBS phải là số nguyên dương"
+
+(( MAX_JOBS <= 2 )) ||
+  die "MAX_JOBS không được lớn hơn 2"
+
+cd "$ROOT" || die "Không thể truy cập repository"
+
+for config in "${CONFIGS[@]}"; do
+  [[ -f "$config" ]] ||
+    die "Không tìm thấy config: $config"
+done
+
+# Không chạy training trên tracked code chưa commit.
+git diff --quiet -- ||
+  die "Tracked working tree đang có thay đổi chưa commit"
+
+git diff --cached --quiet -- ||
+  die "Staging area đang có thay đổi chưa commit"
+
+RUN_HEAD="$(git rev-parse HEAD)" ||
+  die "Không đọc được Git HEAD"
+
+STATE_ROOT="$ROOT/.method_queue/u1_u4_simple"
+STATE_DIR="$STATE_ROOT/${RUN_HEAD}_seed${SEED}"
 LOG_DIR="$STATE_DIR/logs"
-LOCK_FILE="$STATE_DIR/queue.lock"
 
-mkdir -p "$DONE_DIR" "$LOG_DIR"
+mkdir -p "$LOG_DIR"
 
-cd "$ROOT"
+# Không cho hai scheduler cùng quản lý queue.
+exec 9>"$STATE_ROOT/scheduler.lock"
+flock -n 9 ||
+  die "Một phiên run_methods.sh khác đang chạy"
 
-# ============================================================
-# KHÔNG CHO HAI QUEUE CHẠY ĐỒNG THỜI
-# ============================================================
-
-exec 9>"$LOCK_FILE"
-
-if ! flock -n 9; then
-  echo "[ERROR] Một phiên run_methods.sh khác đang chạy." >&2
-  exit 1
-fi
+log "Repository HEAD: $RUN_HEAD"
+log "GPU=$GPU"
+log "Seed=$SEED"
+log "Tối đa $MAX_JOBS job"
+log "VRAM yêu cầu: ${MIN_FREE_VRAM_MIB} MiB"
 
 # ============================================================
-# THÔNG TIN ĐẦU PHIÊN
+# QUẢN LÝ TRẠNG THÁI
 # ============================================================
 
-echo "============================================================"
-echo "AugSeg sequential runner"
-echo "Repository: $ROOT"
-echo "Conda:     $CONDA_EXE"
-echo "Environment: $CONDA_ENV"
-echo "GPU:       $GPU"
-echo "Seed:      $SEED"
-echo "Jobs:      ${#CONFIGS[@]}"
-echo "Started:   $(date --iso-8601=seconds)"
-echo "============================================================"
+pid_file() {
+  printf '%s/%s.pid' "$STATE_DIR" "$1"
+}
 
-# ============================================================
-# CHẠY LẦN LƯỢT TỪNG CONFIG
-# ============================================================
+done_file() {
+  printf '%s/%s.done' "$STATE_DIR" "$1"
+}
 
-for index in "${!CONFIGS[@]}"; do
-  config="${CONFIGS[$index]}"
+retry_file() {
+  printf '%s/%s.retry_at' "$STATE_DIR" "$1"
+}
 
-  # ----------------------------------------------------------
-  # Kiểm tra config
-  # ----------------------------------------------------------
+solo_file() {
+  printf '%s/%s.requires_solo' "$STATE_DIR" "$1"
+}
 
-  if [[ ! -f "$config" ]]; then
-    echo >&2
-    echo "[ERROR] Config không tồn tại:" >&2
-    echo "$ROOT/$config" >&2
-    exit 1
+fatal_file() {
+  printf '%s/%s.fatal' "$STATE_DIR" "$1"
+}
+
+attempt_file() {
+  printf '%s/%s.attempt' "$STATE_DIR" "$1"
+}
+
+method_is_done() {
+  [[ -f "$(done_file "$1")" ]]
+}
+
+method_is_running() {
+  local method="$1"
+  local file
+  local pid=""
+
+  file="$(pid_file "$method")"
+
+  [[ -f "$file" ]] || return 1
+
+  read -r pid < "$file" || true
+
+  if [[ "$pid" =~ ^[0-9]+$ ]] &&
+     kill -0 "$pid" 2>/dev/null; then
+    return 0
   fi
 
-  # Lấy tên thư mục chứa config làm tên phương pháp.
-  method_name="$(basename "$(dirname "$config")")"
+  # PID cũ không còn tồn tại.
+  rm -f "$file"
+  return 1
+}
 
-  done_file="$DONE_DIR/${method_name}_seed${SEED}.done"
-  log_file="$LOG_DIR/${method_name}_seed${SEED}.log"
+active_job_count() {
+  local count=0
+  local method
 
-  # ----------------------------------------------------------
-  # Bỏ qua phương pháp đã hoàn thành
-  # ----------------------------------------------------------
+  for method in "${METHODS[@]}"; do
+    if method_is_running "$method"; then
+      count=$((count + 1))
+    fi
+  done
 
-  if [[ -f "$done_file" ]]; then
-    echo "[SKIP] $method_name đã hoàn thành với seed $SEED"
+  printf '%s\n' "$count"
+}
+
+gpu_free_vram() {
+  local value
+
+  value="$(
+    nvidia-smi \
+      -i "$GPU" \
+      --query-gpu=memory.free \
+      --format=csv,noheader,nounits \
+      2>/dev/null |
+      head -n 1 |
+      tr -d '[:space:]'
+  )"
+
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+
+  printf '%s\n' "$value"
+}
+
+retry_is_ready() {
+  local method="$1"
+  local file
+  local retry_at=0
+  local now
+
+  file="$(retry_file "$method")"
+
+  [[ -f "$file" ]] || return 0
+
+  read -r retry_at < "$file" || retry_at=0
+
+  [[ "$retry_at" =~ ^[0-9]+$ ]] || retry_at=0
+
+  now="$(date +%s)"
+
+  (( now >= retry_at ))
+}
+
+next_attempt() {
+  local method="$1"
+  local file
+  local attempt=0
+
+  file="$(attempt_file "$method")"
+
+  if [[ -f "$file" ]]; then
+    read -r attempt < "$file" || attempt=0
+  fi
+
+  [[ "$attempt" =~ ^[0-9]+$ ]] || attempt=0
+
+  attempt=$((attempt + 1))
+
+  printf '%s\n' "$attempt" > "$file"
+  printf '%s\n' "$attempt"
+}
+
+log_contains_oom() {
+  local file="$1"
+
+  grep -Eiq \
+    'CUDA out of memory|CUDA error: out of memory|CUDA_ERROR_OUT_OF_MEMORY|CUBLAS_STATUS_ALLOC_FAILED|std::bad_alloc|out of memory' \
+    "$file"
+}
+
+# ============================================================
+# CHẠY MỘT PHƯƠNG PHÁP
+# ============================================================
+
+run_method() {
+  local index="$1"
+  local method="${METHODS[$index]}"
+  local config="${CONFIGS[$index]}"
+  local port=$((BASE_PORT + index))
+
+  local attempt
+  local output_log
+  local exit_code
+  local retry_at
+
+  attempt="$(next_attempt "$method")"
+  output_log="$LOG_DIR/${method}.attempt_${attempt}.log"
+
+  # Xóa PID khi process kết thúc.
+  trap 'rm -f "$(pid_file "$method")"' EXIT
+
+  log "$method: bắt đầu attempt $attempt"
+  log "$method: config=$config"
+  log "$method: port=$port"
+  log "$method: log=$output_log"
+
+  # Giữ nguyên W&B/Hugging Face credentials và policy hiện tại.
+  if [[ -f "$ENV_FILE" ]]; then
+    set -a
+
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+
+    set +a
+  fi
+
+  # Đây chỉ là lệnh chạy train_semi.py.
+  # Không có Python nhúng và không tạo config tạm.
+  CUDA_VISIBLE_DEVICES="$GPU" \
+    "$CONDA_EXE" run \
+      --no-capture-output \
+      -n "$CONDA_ENV" \
+    python -m torch.distributed.run \
+      --standalone \
+      --nproc_per_node=1 \
+      --master_port="$port" \
+      train_semi.py \
+      --config="$config" \
+      --seed "$SEED" \
+      --port "$port" \
+      2>&1 | tee -a "$output_log"
+
+  exit_code=${PIPESTATUS[0]}
+
+  if (( exit_code == 0 )); then
+    {
+      printf 'STATUS=success\n'
+      printf 'HEAD=%s\n' "$RUN_HEAD"
+      printf 'CONFIG=%s\n' "$config"
+      printf 'SEED=%s\n' "$SEED"
+      printf 'ATTEMPT=%s\n' "$attempt"
+      printf 'FINISHED_AT=%s\n' "$(timestamp)"
+    } > "$(done_file "$method")"
+
+    rm -f \
+      "$(retry_file "$method")" \
+      "$(solo_file "$method")" \
+      "$(fatal_file "$method")"
+
+    log "$method: hoàn thành thành công"
+    return 0
+  fi
+
+  if log_contains_oom "$output_log"; then
+    retry_at=$(($(date +%s) + OOM_RETRY_SECONDS))
+
+    printf '%s\n' "$retry_at" > "$(retry_file "$method")"
+
+    # Sau OOM, lần retry tiếp theo phải chạy một mình.
+    : > "$(solo_file "$method")"
+
+    log "$method: phát hiện OOM"
+    log "$method: chờ ${OOM_RETRY_SECONDS}s rồi retry"
+    log "$method: retry dùng lại đúng config gốc"
+    log "$method: train_semi.py sẽ tự auto-resume"
+
+    return 0
+  fi
+
+  {
+    printf 'STATUS=fatal\n'
+    printf 'HEAD=%s\n' "$RUN_HEAD"
+    printf 'CONFIG=%s\n' "$config"
+    printf 'SEED=%s\n' "$SEED"
+    printf 'ATTEMPT=%s\n' "$attempt"
+    printf 'EXIT_CODE=%s\n' "$exit_code"
+    printf 'LOG=%s\n' "$output_log"
+    printf 'FAILED_AT=%s\n' "$(timestamp)"
+  } > "$(fatal_file "$method")"
+
+  : > "$STATE_DIR/FATAL"
+
+  log "$method: lỗi không phải OOM, exit code=$exit_code"
+  log "$method: scheduler sẽ không mở thêm job"
+
+  return 0
+}
+
+launch_method() {
+  local index="$1"
+  local method="${METHODS[$index]}"
+  local worker_pid
+
+  run_method "$index" &
+
+  worker_pid=$!
+
+  printf '%s\n' "$worker_pid" > "$(pid_file "$method")"
+
+  log "$method: đã khởi chạy PID $worker_pid"
+}
+
+# ============================================================
+# SCHEDULER
+# ============================================================
+
+while true; do
+  # Không mở job mới nếu repository bị thay đổi trong lúc scheduler chạy.
+  if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$RUN_HEAD" ]] ||
+     ! git diff --quiet -- ||
+     ! git diff --cached --quiet --; then
+    : > "$STATE_DIR/FATAL"
+    log "Repository đã thay đổi; dừng mở job mới"
+  fi
+
+  active="$(active_job_count)"
+
+  # Lỗi không phải OOM: không mở job mới.
+  if [[ -f "$STATE_DIR/FATAL" ]]; then
+    if (( active == 0 )); then
+      die "Scheduler dừng. Kiểm tra $STATE_DIR/*.fatal"
+    fi
+
+    log "Có lỗi fatal; chờ $active job đang chạy kết thúc"
+    sleep "$POLL_SECONDS"
     continue
   fi
 
-  # Mỗi phương pháp dùng một port riêng theo vị trí trong danh sách.
-  port=$((BASE_PORT + index))
+  # Kiểm tra tất cả phương pháp đã hoàn tất chưa.
+  all_done=1
 
-  echo
-  echo "============================================================"
-  echo "[RUN]      $method_name"
-  echo "Config:    $config"
-  echo "Seed:      $SEED"
-  echo "GPU:       $GPU"
-  echo "Port:      $port"
-  echo "Log:       $log_file"
-  echo "Started:   $(date --iso-8601=seconds)"
-  echo "============================================================"
+  for method in "${METHODS[@]}"; do
+    if ! method_is_done "$method"; then
+      all_done=0
+      break
+    fi
+  done
 
-  # ----------------------------------------------------------
-  # Khởi tạo log
-  #
-  # Dấu > ghi đè log cũ của method chưa hoàn thành.
-  # ----------------------------------------------------------
-
-  {
-    echo "METHOD=$method_name"
-    echo "CONFIG=$config"
-    echo "SEED=$SEED"
-    echo "GPU=$GPU"
-    echo "PORT=$port"
-    echo "CONDA_EXE=$CONDA_EXE"
-    echo "CONDA_ENV=$CONDA_ENV"
-    echo "STARTED_AT=$(date --iso-8601=seconds)"
-    echo "============================================================"
-  } > "$log_file"
-
-  # ----------------------------------------------------------
-  # Chạy training
-  #
-  # Tạm tắt set -e để lấy exit code và tự xử lý lỗi.
-  # ----------------------------------------------------------
-
-  set +e
-
-  CUDA_VISIBLE_DEVICES="$GPU" \
-  "$CONDA_EXE" run \
-    --no-capture-output \
-    -n "$CONDA_ENV" \
-  python -m torch.distributed.run \
-    --standalone \
-    --nproc_per_node=1 \
-    --master_port="$port" \
-    train_semi.py \
-    --config="$config" \
-    --seed "$SEED" \
-    --port "$port" \
-    2>&1 | tee -a "$log_file"
-
-  # Lưu ngay trạng thái của từng lệnh trong pipeline:
-  # [0] = conda/Python training
-  # [1] = tee ghi log
-  pipeline_status=("${PIPESTATUS[@]}")
-
-  train_exit_code="${pipeline_status[0]}"
-  tee_exit_code="${pipeline_status[1]}"
-
-  set -e
-
-  # ----------------------------------------------------------
-  # Xử lý lỗi training hoặc lỗi ghi log
-  # ----------------------------------------------------------
-
-  if [[ "$train_exit_code" -ne 0 || "$tee_exit_code" -ne 0 ]]; then
-    echo
-    echo "============================================================"
-    echo "[FAILED] $method_name"
-    echo "Training exit code: $train_exit_code"
-    echo "Log writer exit code: $tee_exit_code"
-    echo "Log: $log_file"
-    echo
-    echo "Queue dừng tại phương pháp này."
-    echo "Không tạo marker .done."
-    echo
-    echo "Sau khi xử lý lỗi, chạy lại run_methods.sh:"
-    echo "- phương pháp đã hoàn thành sẽ được bỏ qua;"
-    echo "- phương pháp này sẽ được gọi lại."
-    echo "============================================================"
-
-    if [[ "$train_exit_code" -ne 0 ]]; then
-      exit "$train_exit_code"
+  if (( all_done == 1 )); then
+    if (( active == 0 )); then
+      log "U1, U2, U3 và U4 đều đã hoàn thành"
+      exit 0
     fi
 
-    exit "$tee_exit_code"
+    sleep "$POLL_SECONDS"
+    continue
   fi
 
-  # ----------------------------------------------------------
-  # Chỉ tạo marker khi training và ghi log đều thành công
-  # ----------------------------------------------------------
+  # Đang đủ 2 job thì chỉ chờ.
+  if (( active >= MAX_JOBS )); then
+    log "Đang chạy $active/$MAX_JOBS job"
+    sleep "$POLL_SECONDS"
+    continue
+  fi
 
-  {
-    echo "METHOD=$method_name"
-    echo "CONFIG=$config"
-    echo "SEED=$SEED"
-    echo "GPU=$GPU"
-    echo "PORT=$port"
-    echo "FINISHED_AT=$(date --iso-8601=seconds)"
-    echo "STATUS=success"
-  } > "$done_file"
+  # ==========================================================
+  # ƯU TIÊN METHOD ĐÃ TỪNG OOM
+  # ==========================================================
 
-  echo
-  echo "[DONE] $method_name"
+  solo_index=-1
+
+  for index in "${!METHODS[@]}"; do
+    method="${METHODS[$index]}"
+
+    if [[ -f "$(solo_file "$method")" ]] &&
+       ! method_is_done "$method" &&
+       ! method_is_running "$method"; then
+      solo_index="$index"
+      break
+    fi
+  done
+
+  if (( solo_index >= 0 )); then
+    method="${METHODS[$solo_index]}"
+
+    # Method từng OOM chỉ retry khi không còn job nào khác.
+    if (( active > 0 )); then
+      log "$method cần chạy solo; chờ $active job còn lại"
+      sleep "$POLL_SECONDS"
+      continue
+    fi
+
+    if ! retry_is_ready "$method"; then
+      log "$method chưa tới thời điểm retry"
+      sleep "$POLL_SECONDS"
+      continue
+    fi
+  fi
+
+  # ==========================================================
+  # KIỂM TRA VRAM
+  # ==========================================================
+
+  free_vram="$(gpu_free_vram)" || {
+    log "Không đọc được VRAM GPU $GPU"
+    sleep "$POLL_SECONDS"
+    continue
+  }
+
+  if (( free_vram < MIN_FREE_VRAM_MIB )); then
+    log "GPU còn ${free_vram} MiB; cần ${MIN_FREE_VRAM_MIB} MiB"
+    sleep "$POLL_SECONDS"
+    continue
+  fi
+
+  # Nếu có method cần retry solo, chạy method đó trước.
+  if (( solo_index >= 0 )); then
+    launch_method "$solo_index"
+    sleep "$LAUNCH_SETTLE_SECONDS"
+    continue
+  fi
+
+  # ==========================================================
+  # TÌM METHOD TIẾP THEO CHƯA CHẠY
+  # ==========================================================
+
+  launch_index=-1
+
+  for index in "${!METHODS[@]}"; do
+    method="${METHODS[$index]}"
+
+    if method_is_done "$method"; then
+      continue
+    fi
+
+    if method_is_running "$method"; then
+      continue
+    fi
+
+    if [[ -f "$(fatal_file "$method")" ]]; then
+      continue
+    fi
+
+    if ! retry_is_ready "$method"; then
+      continue
+    fi
+
+    launch_index="$index"
+    break
+  done
+
+  if (( launch_index >= 0 )); then
+    launch_method "$launch_index"
+
+    # Đợi job vừa mở cấp phát VRAM ổn định.
+    sleep "$LAUNCH_SETTLE_SECONDS"
+  else
+    log "Chưa có method nào sẵn sàng để mở"
+    sleep "$POLL_SECONDS"
+  fi
 done
-
-# ============================================================
-# KẾT THÚC
-# ============================================================
-
-echo
-echo "============================================================"
-echo "TẤT CẢ METHOD ĐÃ HOÀN THÀNH"
-echo "Finished: $(date --iso-8601=seconds)"
-echo "============================================================"
