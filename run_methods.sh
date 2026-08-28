@@ -38,10 +38,10 @@ OOM_RETRY_SECONDS="${OOM_RETRY_SECONDS:-300}"
 BASE_PORT="${BASE_PORT:-53947}"
 
 CONFIGS=(
-  "exps/boundary_mix_v2_v3/voc_semi662/u1_self_pseudo_saliency_u2u_cutmix/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/u2_cross_view_saliency_u2u_cutmix/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/u3_confidence_filtered_cross_view_saliency_u2u_cutmix/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/u4_confidence_filtered_self_pseudo_saliency_u2u_cutmix/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/u1_self_pseudo_saliency_u2u_cutmix_c321_bs16x1_gbs16/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/u2_cross_view_saliency_u2u_cutmix_c321_bs16x1_gbs16/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/u3_confidence_filtered_cross_view_saliency_u2u_cutmix_c321_bs16x1_gbs16/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/u4_confidence_filtered_self_pseudo_saliency_u2u_cutmix_c321_bs16x1_gbs16/config.yaml"
 )
 
 METHODS=(
