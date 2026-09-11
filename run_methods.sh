@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Chạy U1–U4, tối đa 2 job trên cùng một GPU.
+# Chạy duy nhất AugSeg baseline crop321 BS16 trên một GPU.
 # train_semi.py tự quản lý checkpoint, auto-resume, W&B và Hugging Face.
 
 set -uo pipefail
@@ -19,11 +19,11 @@ CONDA_ENV="augseg-bm"
 GPU="${GPU:-0}"
 SEED="${SEED:-2}"
 
-# Tối đa 2 training job đồng thời.
-MAX_JOBS="${MAX_JOBS:-2}"
+# Chỉ chạy một training job tại một thời điểm.
+MAX_JOBS="${MAX_JOBS:-1}"
 
 # Chỉ khởi chạy job mới khi còn ít nhất lượng VRAM này.
-MIN_FREE_VRAM_MIB="${MIN_FREE_VRAM_MIB:-10000}"
+MIN_FREE_VRAM_MIB="${MIN_FREE_VRAM_MIB:-16000}"
 
 # Kiểm tra lại GPU và trạng thái job mỗi 120 giây.
 POLL_SECONDS="${POLL_SECONDS:-120}"
@@ -38,17 +38,11 @@ OOM_RETRY_SECONDS="${OOM_RETRY_SECONDS:-300}"
 BASE_PORT="${BASE_PORT:-53947}"
 
 CONFIGS=(
-  "exps/boundary_mix_v2_v3/voc_semi662/u1_self_pseudo_saliency_u2u_cutmix_c321_bs16x1_gbs16/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/u2_cross_view_saliency_u2u_cutmix_c321_bs16x1_gbs16/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/u3_confidence_filtered_cross_view_saliency_u2u_cutmix_c321_bs16x1_gbs16/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/u4_confidence_filtered_self_pseudo_saliency_u2u_cutmix_c321_bs16x1_gbs16/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/baseline_augseg_fair80_c321_bs16x1_gbs16/config.yaml"
 )
 
 METHODS=(
-  "u1_self_pseudo_saliency_u2u_cutmix"
-  "u2_cross_view_saliency_u2u_cutmix"
-  "u3_confidence_filtered_cross_view_saliency_u2u_cutmix"
-  "u4_confidence_filtered_self_pseudo_saliency_u2u_cutmix"
+  "baseline_augseg_fair80_r101_c321_bs16x1_gbs16"
 )
 
 # ============================================================
@@ -414,7 +408,7 @@ while true; do
 
   if (( all_done == 1 )); then
     if (( active == 0 )); then
-      log "U1, U2, U3 và U4 đều đã hoàn thành"
+      log "AugSeg baseline crop321 BS16 đã hoàn thành"
       exit 0
     fi
 
@@ -422,7 +416,7 @@ while true; do
     continue
   fi
 
-  # Đang đủ 2 job thì chỉ chờ.
+  # Đã đạt giới hạn job thì chỉ chờ.
   if (( active >= MAX_JOBS )); then
     log "Đang chạy $active/$MAX_JOBS job"
     sleep "$POLL_SECONDS"
