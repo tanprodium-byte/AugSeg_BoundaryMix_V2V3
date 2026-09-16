@@ -56,7 +56,7 @@ trainer:
 saver:
   auto_resume: true
   auto_profile_dir: true
-  snapshot_dir: ../../../../exp_boundary_mix_v2_v3/v3_js_bcr_d2_lambda0p05
+  snapshot_dir: ../../../../exp_boundary_mix_v2_v3/v3_js_bcr_d2_corrected_lambda0p01_voc662_r101_c321_bs8x1_gbs8
   pretrain: ''
   use_tb: false
 criterion:
@@ -90,10 +90,10 @@ wandb:
   enable: false
   project: AugsegResearch
   entity: tanprodium-uit
-  name: v3_js_bcr_d2_corrected_lambda0p05_voc662
+  name: v3_js_bcr_d2_corrected_lambda0p01_voc662_r101_c321_bs8x1_gbs8
   log_every: 50
 run:
-  name: v3_js_bcr_d2_corrected_lambda0p05_voc662
+  name: v3_js_bcr_d2_corrected_lambda0p01_voc662_r101_c321_bs8x1_gbs8
   log_every: 50
 checkpoint:
   auto_resume: true
@@ -109,7 +109,7 @@ hf:
   upload_every_epoch: true
   keep_only_latest: true
   bundle_name: latest.tar.gz
-  path_in_repo: boundary_mix_v2_v3/voc_semi662/v3_js_bcr_d2_lambda0p05/latest.tar.gz
+  path_in_repo: boundary_mix_v2_v3/voc_semi662/v3_js_bcr_d2_corrected_lambda0p01_voc662/r101_c321_bs8x1_gbs8/latest.tar.gz
   squash_after_upload: false
 boundary_mix:
   enabled: false
@@ -128,7 +128,7 @@ boundary_compatibility:
   tau_same: 0.8
   tau_diff: 0.3
   margin: 0.4
-  lambda_bcr: 0.05
+  lambda_bcr: 0.01
   use_confidence_gate: true
   use_component_gate: false
   feature_layer: decoder

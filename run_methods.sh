@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Chạy batch 5 thí nghiệm V3-d2 đã định trước trên một GPU.
+# Chạy duy nhất AugSeg baseline crop321 BS16 trên một GPU.
 # train_semi.py tự quản lý checkpoint, auto-resume, W&B và Hugging Face.
 
 set -uo pipefail
@@ -38,11 +38,11 @@ OOM_RETRY_SECONDS="${OOM_RETRY_SECONDS:-300}"
 BASE_PORT="${BASE_PORT:-53947}"
 
 CONFIGS=(
-  "exps/boundary_mix_v2_v3/voc_semi662/v3_js_bcr_d2/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/v3_js_bcr_d2_lambda0p05/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi662/v3_js_bcr_d2_lambda0p10/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi1323/baseline_augseg_fair80_c321_bs8/config.yaml"
-  "exps/boundary_mix_v2_v3/voc_semi1323/v3_js_bcr_d2/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/v3_js_bcr_d2_lambda0p01_c321_bs8x1_gbs8/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/v3_js_bcr_d2_lambda0p05_c321_bs8x1_gbs8/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi662/v3_js_bcr_d2_lambda0p10_c321_bs8x1_gbs8/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi1323/baseline_augseg_fair80_c321_bs8x1_gbs8/config.yaml"
+  "exps/boundary_mix_v2_v3/voc_semi1323/v3_js_bcr_d2_lambda0p01_c321_bs8x1_gbs8/config.yaml"
 )
 
 METHODS=(
@@ -94,16 +94,6 @@ command -v nvidia-smi >/dev/null 2>&1 ||
 
 cd "$ROOT" || die "Không thể truy cập repository"
 
-(( ${#CONFIGS[@]} == ${#METHODS[@]} )) ||
-  die "Số config và method không khớp"
-
-declare -A seen_methods=()
-for method in "${METHODS[@]}"; do
-  [[ -z "${seen_methods[$method]:-}" ]] ||
-    die "Method bị trùng: $method"
-  seen_methods[$method]=1
-done
-
 for config in "${CONFIGS[@]}"; do
   [[ -f "$config" ]] ||
     die "Không tìm thấy config: $config"
@@ -119,7 +109,7 @@ git diff --cached --quiet -- ||
 RUN_HEAD="$(git rev-parse HEAD)" ||
   die "Không đọc được Git HEAD"
 
-STATE_ROOT="$ROOT/.method_queue/v3_d2_next5"
+STATE_ROOT="$ROOT/.method_queue/u1_u4_simple"
 STATE_DIR="$STATE_ROOT/${RUN_HEAD}_seed${SEED}"
 LOG_DIR="$STATE_DIR/logs"
 
@@ -426,7 +416,7 @@ while true; do
 
   if (( all_done == 1 )); then
     if (( active == 0 )); then
-      log "Batch 5 thí nghiệm V3-d2 đã hoàn thành"
+      log "AugSeg baseline crop321 BS16 đã hoàn thành"
       exit 0
     fi
 
