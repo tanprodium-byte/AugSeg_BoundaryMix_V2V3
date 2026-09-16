@@ -454,7 +454,18 @@ def cut_mix_label_adaptive_with_mask(
     csl_destination_policy="low_reliability",
     destination_context=None,
     destination_diagnostics=None,
+    return_labeled_origin_mask=False,
 ):
+    """Apply adaptive labeled enrichment and the final U-to-U CutMix paste.
+
+    The legacy four-value interface is retained when
+    ``return_labeled_origin_mask`` is false: its fourth value keeps the
+    historical surviving-labeled-origin meaning.  When the flag is true, the
+    fourth value is the final U-to-U paste geometry (``mix_source_mask``) and
+    the fifth is the independently relocated ``labeled_origin_mask``.  Any
+    optional component metadata, Teacher probabilities, and CE weights follow
+    those provenance tensors in their existing order.
+    """
     assert len(lst_confidences) == len(unlabeled_image), "Ensure the confidence is properly obtained"
     assert labeled_image.shape == unlabeled_image.shape, "Ensure shape match between lb and unlb"
     mix_unlabeled_image = unlabeled_image.clone()
@@ -466,8 +477,12 @@ def cut_mix_label_adaptive_with_mask(
     target_component_logits = unlabeled_logits.clone()
     mix_target_component_mask = target_component_mask.clone()
     mix_target_component_logits = target_component_logits.clone()
+    # These masks intentionally describe different provenance dimensions.
+    # mix_source_mask tracks the final U->U (or direct) paste geometry, while
+    # mix_labeled_origin_mask tracks pixels whose semantic target came from GT.
     mix_source_mask = torch.zeros_like(unlabeled_mask, dtype=torch.float32)
-    source_mask = torch.zeros_like(unlabeled_mask, dtype=torch.float32)
+    mix_labeled_origin_mask = torch.zeros_like(unlabeled_mask, dtype=torch.float32)
+    labeled_origin_mask = torch.zeros_like(unlabeled_mask, dtype=torch.float32)
     labeled_logits = torch.ones_like(labeled_mask)
 
     u_rand_index = torch.randperm(unlabeled_image.size()[0])[:unlabeled_image.size()[0]]
@@ -483,54 +498,21 @@ def cut_mix_label_adaptive_with_mask(
         raise ValueError(f"Unsupported direct_paste_policy: {direct_paste_policy}")
 
     def _return_with_optional_metadata():
+        result = [
+            mix_unlabeled_image,
+            mix_unlabeled_target,
+            mix_unlabeled_logits,
+            mix_source_mask,
+        ]
+        if return_labeled_origin_mask:
+            result.append(mix_labeled_origin_mask)
         if return_target_metadata:
-            if mix_unlabeled_probs is not None and mix_unlabeled_weight is not None:
-                return (
-                    mix_unlabeled_image,
-                    mix_unlabeled_target,
-                    mix_unlabeled_logits,
-                    mix_source_mask,
-                    target_component_mask,
-                    target_component_logits,
-                    mix_unlabeled_probs,
-                    mix_unlabeled_weight,
-                )
-            if mix_unlabeled_probs is not None:
-                return (
-                    mix_unlabeled_image,
-                    mix_unlabeled_target,
-                    mix_unlabeled_logits,
-                    mix_source_mask,
-                    target_component_mask,
-                    target_component_logits,
-                    mix_unlabeled_probs,
-                )
-            if mix_unlabeled_weight is not None:
-                return (
-                    mix_unlabeled_image,
-                    mix_unlabeled_target,
-                    mix_unlabeled_logits,
-                    mix_source_mask,
-                    target_component_mask,
-                    target_component_logits,
-                    mix_unlabeled_weight,
-                )
-            return (
-                mix_unlabeled_image,
-                mix_unlabeled_target,
-                mix_unlabeled_logits,
-                mix_source_mask,
-                target_component_mask,
-                target_component_logits,
-            )
-
-        if mix_unlabeled_probs is not None and mix_unlabeled_weight is not None:
-            return mix_unlabeled_image, mix_unlabeled_target, mix_unlabeled_logits, mix_source_mask, mix_unlabeled_probs, mix_unlabeled_weight
+            result.extend((target_component_mask, target_component_logits))
         if mix_unlabeled_probs is not None:
-            return mix_unlabeled_image, mix_unlabeled_target, mix_unlabeled_logits, mix_source_mask, mix_unlabeled_probs
+            result.append(mix_unlabeled_probs)
         if mix_unlabeled_weight is not None:
-            return mix_unlabeled_image, mix_unlabeled_target, mix_unlabeled_logits, mix_source_mask, mix_unlabeled_weight
-        return mix_unlabeled_image, mix_unlabeled_target, mix_unlabeled_logits, mix_source_mask
+            result.append(mix_unlabeled_weight)
+        return tuple(result)
 
     if direct_labeled_mix and labeled_boxes is not None:
         labeled_boxes = torch.as_tensor(labeled_boxes, device=unlabeled_image.device, dtype=torch.long)
@@ -593,6 +575,7 @@ def cut_mix_label_adaptive_with_mask(
             if mix_unlabeled_weight is not None:
                 mix_unlabeled_weight[i, dst_h1:dst_h2, dst_w1:dst_w2] = 1.0
             mix_source_mask[i, dst_h1:dst_h2, dst_w1:dst_w2] = 1.0
+            mix_labeled_origin_mask[i, dst_h1:dst_h2, dst_w1:dst_w2] = 1.0
 
         return _return_with_optional_metadata()
 
@@ -641,6 +624,7 @@ def cut_mix_label_adaptive_with_mask(
             if mix_unlabeled_weight is not None:
                 mix_unlabeled_weight[i, dst_h1:dst_h2, dst_w1:dst_w2][local_mask] = 1.0
             mix_source_mask[i, dst_h1:dst_h2, dst_w1:dst_w2][local_mask] = 1.0
+            mix_labeled_origin_mask[i, dst_h1:dst_h2, dst_w1:dst_w2][local_mask] = 1.0
 
             delta_r = translation["delta_r"]
             delta_c = translation["delta_c"]
@@ -686,6 +670,7 @@ def cut_mix_label_adaptive_with_mask(
             if mix_unlabeled_weight is not None:
                 mix_unlabeled_weight[i, mask] = 1.0
             mix_source_mask[i, mask] = 1.0
+            mix_labeled_origin_mask[i, mask] = 1.0
 
         return _return_with_optional_metadata()
 
@@ -722,7 +707,7 @@ def cut_mix_label_adaptive_with_mask(
             if mix_unlabeled_weight is not None:
                 mix_unlabeled_weight[i, l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]] = 1.0
 
-            mix_source_mask[i, l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]] = 1.0
+            mix_labeled_origin_mask[i, l_bbx1[i]:l_bbx2[i], l_bby1[i]:l_bby2[i]] = 1.0
 
     if target_boxes is not None:
         target_boxes = torch.as_tensor(target_boxes, device=unlabeled_image.device, dtype=torch.long)
@@ -762,51 +747,25 @@ def cut_mix_label_adaptive_with_mask(
             mix_target_component_logits[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
         )
 
-        source_mask[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
-            mix_source_mask[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
+        mix_source_mask[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = 1.0
+
+        labeled_origin_mask[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = (
+            mix_labeled_origin_mask[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
         )
 
+    # Preserve the historical fourth return value for callers that have not
+    # opted into the provenance split. BCR-enabled callers request both masks.
+    returned_source_mask = mix_source_mask if return_labeled_origin_mask else labeled_origin_mask
+    result = [unlabeled_image, unlabeled_mask, unlabeled_logits, returned_source_mask]
+    if return_labeled_origin_mask:
+        result.append(labeled_origin_mask)
     if return_target_metadata:
-        if unlabeled_probs is not None and unlabeled_weight is not None:
-            return (
-                unlabeled_image,
-                unlabeled_mask,
-                unlabeled_logits,
-                source_mask,
-                target_component_mask,
-                target_component_logits,
-                unlabeled_probs,
-                unlabeled_weight,
-            )
-        if unlabeled_probs is not None:
-            return (
-                unlabeled_image,
-                unlabeled_mask,
-                unlabeled_logits,
-                source_mask,
-                target_component_mask,
-                target_component_logits,
-                unlabeled_probs,
-            )
-        if unlabeled_weight is not None:
-            return (
-                unlabeled_image,
-                unlabeled_mask,
-                unlabeled_logits,
-                source_mask,
-                target_component_mask,
-                target_component_logits,
-                unlabeled_weight,
-            )
-        return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, target_component_mask, target_component_logits
-
-    if unlabeled_probs is not None and unlabeled_weight is not None:
-        return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, unlabeled_probs, unlabeled_weight
+        result.extend((target_component_mask, target_component_logits))
     if unlabeled_probs is not None:
-        return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, unlabeled_probs
+        result.append(unlabeled_probs)
     if unlabeled_weight is not None:
-        return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask, unlabeled_weight
-    return unlabeled_image, unlabeled_mask, unlabeled_logits, source_mask
+        result.append(unlabeled_weight)
+    return tuple(result)
 
 
 def thresholded_boundary_mix_loss(

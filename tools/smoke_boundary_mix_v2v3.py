@@ -10,7 +10,13 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from util.boundary_component import compute_component_weights
-from util.boundary_compatibility import compute_js_boundary_compatibility_loss
+from util.boundary_compatibility import compute_js_boundary_compatibility_loss as _compute_js_bcr
+
+
+def compute_js_boundary_compatibility_loss(*args, **kwargs):
+    """Keep legacy smoke cases explicit about their historical origin mask."""
+    kwargs.setdefault("labeled_origin_mask", args[4])
+    return _compute_js_bcr(*args, **kwargs)
 
 
 def _weighted_ce_denominator(weight, target, ignore_index=255, eps=1e-6):

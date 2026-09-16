@@ -1690,6 +1690,7 @@ def train(
             )
 
             mix_source_mask = None
+            labeled_origin_mask = None
             target_component_label = None
             target_component_confidence = None
             if ar_applied:
@@ -1895,6 +1896,7 @@ def train(
                             image_u_aug, label_u_aug, logits_u_aug,
                             image_l, label_l, confidence,
                             return_target_metadata=True,
+                            return_labeled_origin_mask=boundary_compatibility_enabled,
                             unlabeled_probs=teacher_probs_u_aug,
                             unlabeled_weight=csl_weight_u if csl_use_ce_weight else None,
                             labeled_boxes=saliency_labeled_boxes,
@@ -1915,6 +1917,7 @@ def train(
                                 label_u_aug,
                                 logits_u_aug,
                                 mix_source_mask,
+                                labeled_origin_mask,
                                 target_component_label,
                                 target_component_confidence,
                                 teacher_probs_u_aug,
@@ -1926,6 +1929,7 @@ def train(
                                 label_u_aug,
                                 logits_u_aug,
                                 mix_source_mask,
+                                labeled_origin_mask,
                                 target_component_label,
                                 target_component_confidence,
                                 teacher_probs_u_aug,
@@ -1954,6 +1958,7 @@ def train(
                             image_u_aug, label_u_aug, logits_u_aug,
                             image_l, label_l, confidence,
                             unlabeled_probs=teacher_probs_u_aug,
+                            return_labeled_origin_mask=boundary_compatibility_enabled,
                             unlabeled_weight=csl_weight_u if csl_use_ce_weight else None,
                             labeled_boxes=saliency_labeled_boxes,
                             labeled_masks=saliency_labeled_masks,
@@ -1968,9 +1973,9 @@ def train(
                             **destination_kwargs,
                         )
                         if boundary_compatibility_enabled and csl_use_ce_weight:
-                            image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, teacher_probs_u_aug, csl_weight_u = mixed_result
+                            image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, labeled_origin_mask, teacher_probs_u_aug, csl_weight_u = mixed_result
                         elif boundary_compatibility_enabled:
-                            image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, teacher_probs_u_aug = mixed_result
+                            image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, labeled_origin_mask, teacher_probs_u_aug = mixed_result
                         elif csl_use_ce_weight:
                             image_u_aug, label_u_aug, logits_u_aug, mix_source_mask, csl_weight_u = mixed_result
                         else:
@@ -2412,6 +2417,7 @@ def train(
                     component_weight_for_bcr if use_component_gate else None,
                     teacher_features_u_strong,
                     boundary_compatibility_cfg,
+                    labeled_origin_mask=labeled_origin_mask.detach() if labeled_origin_mask is not None else None,
                     num_classes=cfg["net"]["num_classes"],
                     ignore_index=ignore,
                     band_width=int(boundary_compatibility_cfg.get("band_width", 3)),

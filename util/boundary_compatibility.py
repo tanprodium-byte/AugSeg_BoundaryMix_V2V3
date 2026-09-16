@@ -139,6 +139,7 @@ def compute_js_boundary_compatibility_loss(
     teacher_features=None,
     cfg=None,
     *,
+    labeled_origin_mask=None,
     num_classes=None,
     ignore_index=255,
     band_width=3,
@@ -170,6 +171,10 @@ def compute_js_boundary_compatibility_loss(
     shaped [B,H,W] / [B,1,H,W], or teacher logits/probabilities shaped
     [B,C,H,W]. In the 4D class-channel case the confidence gate is the max
     probability, computed with softmax for raw logits.
+
+    mix_mask defines only the CutMix boundary geometry. labeled_origin_mask
+    independently selects GT one-hot semantics and unit confidence. Callers
+    must provide both masks so the two provenance meanings cannot be conflated.
 
     The returned loss is not multiplied by lambda_bcr. The training loop owns
     lambda scaling so disabled or lambda_bcr=0 configs stay baseline-neutral.
@@ -219,9 +224,12 @@ def compute_js_boundary_compatibility_loss(
 
     target = mixed_target.detach().to(device=features.device)
     mask = _as_bhw_mask(mix_mask.detach()).to(device=features.device)
+    if labeled_origin_mask is None:
+        raise ValueError("labeled_origin_mask is required and must be distinct from mix_mask semantics")
+    labeled_origin = _as_bhw_mask(labeled_origin_mask.detach()).to(device=features.device)
     confidence = _as_confidence_map(confidence, target.shape, features.device, eps)
-    if target.shape != mask.shape:
-        raise ValueError("mixed_target and mix_mask must have shape [B,H,W]")
+    if target.shape != mask.shape or target.shape != labeled_origin.shape:
+        raise ValueError("mixed_target, mix_mask, and labeled_origin_mask must have shape [B,H,W]")
 
     features = _resize_feature(features, target.shape[-2:])
     features_norm = F.normalize(features, p=2, dim=1, eps=float(eps))
@@ -244,10 +252,11 @@ def compute_js_boundary_compatibility_loss(
             probs = probs.detach()
 
     source_side = mask >= 0.5
-    semantic_probs = torch.where(source_side.unsqueeze(1), one_hot, probs).detach()
+    labeled_side = labeled_origin >= 0.5
+    semantic_probs = torch.where(labeled_side.unsqueeze(1), one_hot, probs).detach()
 
     if use_confidence_gate:
-        gate_map = torch.where(source_side, torch.ones_like(confidence), confidence)
+        gate_map = torch.where(labeled_side, torch.ones_like(confidence), confidence)
     else:
         gate_map = torch.ones_like(confidence)
     if detach_gate:
