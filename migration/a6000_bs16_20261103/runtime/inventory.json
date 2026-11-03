@@ -1,0 +1,35 @@
+{
+  "a6000_runtime_attested": false,
+  "amp": "No autocast/GradScaler in bound trainer; preserve FP32 path",
+  "current_installed_metadata_at_packaging": {
+    "Pillow": "12.2.0",
+    "PyYAML": "6.0.3",
+    "huggingface-hub": "1.17.0",
+    "numpy": "2.4.4",
+    "pydantic": "2.13.4",
+    "torch": "2.11.0+cu128",
+    "torchvision": "0.26.0+cu128",
+    "wandb": "0.27.2"
+  },
+  "determinism": "set_random_seed(... deterministic=True); cuDNN deterministic=True/benchmark=False; strict deterministic algorithms not enforced",
+  "direct_dependencies_metadata_at_packaging": {
+    "Pillow": "12.2.0",
+    "PyYAML": "6.0.3",
+    "huggingface-hub": "1.17.0",
+    "numpy": "2.4.4",
+    "opencv-python": "4.13.0.92",
+    "pandas": "3.0.3",
+    "pydantic": "2.13.4",
+    "scikit-image": "0.26.0",
+    "scipy": "1.17.1",
+    "torch": "2.11.0+cu128",
+    "torchvision": "0.26.0+cu128",
+    "wandb": "0.27.2"
+  },
+  "historical_loaded_cuda_runtime": "UNKNOWN",
+  "historical_loaded_cudnn": "UNKNOWN",
+  "python": "Python 3.11.15",
+  "saved_requirements": "saved-*-requirements.txt are W&B saved package records associated with controls; not proof of loaded libraries",
+  "tf32_effective_historical": "UNKNOWN; not explicitly pinned by source",
+  "wandb_cudaVersion": "13.0; recorded metadata, NOT CUDA runtime attestation"
+}

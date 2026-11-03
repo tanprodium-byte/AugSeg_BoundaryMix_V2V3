@@ -1,0 +1,97 @@
+--- historical/config.yaml
++++ sources/s1/exps/s1_two_stage_random_k8/config.yaml
+@@ -1,9 +1,9 @@
+-name: s1_two_stage_random_k8_s1_two_stage_k8_bs16_20261030_rtx5090_voc662_r101_c321_bs16x1_gbs16_seed2_attempt01
++name: a6000_20261102T181658Z_s1_two_stage_random_k8_4bc977bc
+ dataset:
+   type: pascal_semi
+   train:
+-    data_root: ./data/VOC2012
+-    data_list: ./data/splitsall/pascal_u2pl/662/labeled.txt
++    data_root: /home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012
++    data_list: /home/islabworker2/minhhb/tanvt/augseg_inputs/splits/662/labeled.txt
+     batch_size: 16
+     flip: true
+     rand_resize:
+@@ -19,8 +19,8 @@
+       num_augs: 3
+       flag_use_random_num_sampling: true
+   val:
+-    data_root: ./data/VOC2012
+-    data_list: ./data/splitsall/pascal_u2pl/val.txt
++    data_root: /home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012
++    data_list: /home/islabworker2/minhhb/tanvt/augseg_inputs/splits/val.txt
+     batch_size: 1
+   n_sup: 662
+   workers: 4
+@@ -57,7 +57,7 @@
+ saver:
+   auto_resume: false
+   auto_profile_dir: false
+-  snapshot_dir: /home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/s1_two_stage_random_k8_s1_two_stage_k8_bs16_20261030_rtx5090_voc662_r101_c321_bs16x1_gbs16_seed2_attempt01
++  snapshot_dir: /home/islabworker2/minhhb/tanvt/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_a6000/a6000_20261102T181658Z_s1_two_stage_random_k8_4bc977bc
+   pretrain: ''
+   use_tb: false
+ criterion:
+@@ -70,7 +70,7 @@
+   ema_decay: 0.999
+   encoder:
+     type: augseg.models.resnet.resnet101
+-    pretrain: ./pretrained/resnet101.pth
++    pretrain: /home/islabworker2/minhhb/tanvt/augseg_inputs/pretrained/resnet101.pth
+     kwargs:
+       zero_init_residual: true
+       multi_grid: true
+@@ -91,26 +91,30 @@
+   enable: true
+   project: AugsegLegacyC321Rerun01-RTX5090
+   entity: tanprodium-uit
+-  name: s1_two_stage_random_k8_s1_two_stage_k8_bs16_20261030_rtx5090_voc662_r101_c321_bs16x1_gbs16_seed2_attempt01
++  name: a6000_20261102T181658Z_s1_two_stage_random_k8_4bc977bc
+   log_every: 50
+   resume: never
+   mode: online
+-  group: s1_two_stage_k8_bs16_20261030
++  group: s_ablation_bs16_a6000_20261103
+   tags:
+-  - s1_two_stage_k8_bs16_20261030
+-  - two_stage
+-  - candidate:uniform_multinomial
++  - a6000
++  - bs16
+   - seed:2
+   - fresh80
+-  - control:baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013
++  - s1_two_stage_random_k8
++  - control:baseline-bs16
+ run:
+-  name: s1_two_stage_random_k8_s1_two_stage_k8_bs16_20261030_rtx5090_voc662_r101_c321_bs16x1_gbs16_seed2_attempt01
++  name: a6000_20261102T181658Z_s1_two_stage_random_k8_4bc977bc
+   log_every: 50
+   control_execution_id: baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013
+   source_parent_commit: bbe2224c50db2c277e5d76dbb64f6527489d5b5c
+-  deployment_root: /home/jupyter-iec2024iot04/augseg_deployments/s1_two_stage_k8_bs16_20261030
++  deployment_root: /home/islabworker2/minhhb/tanvt/augseg_deployments/s1_two_stage_k8_bs16_a6000_20261103
+   paired_execution_id: legacy5090_a0703f8ccd03d06611edcf84
+   scientific_role: additional_candidate_selection_control
++  suite_id: s_ablation_bs16_a6000_20261103
++  cohort_baseline_execution_id: a6000_20261102T181658Z_baseline_augseg_441920d4
++  source_pin_sha256: 6014aefe0cfe72922f18790138abfddbcbcc00dba7b45ac3be5efb64f5943dd0
++  migration_package_id: s_ablation_bs16_a6000_20261103
+ checkpoint:
+   auto_resume: false
+   save_latest: true
+@@ -121,11 +125,11 @@
+   repo_id: tanprodium/augseg-legacy-c321-rerun01-rtx5090
+   repo_type: model
+   auto_download: false
+-  auto_upload: true
++  auto_upload: false
+   upload_every_epoch: false
+   keep_only_latest: true
+   bundle_name: latest.tar.gz
+-  path_in_repo: boundary_mix_v2_v3/voc_semi662/s1_two_stage_k8_bs16_20261030/rtx5090/s1_two_stage_random_k8/seed2/attempt01/r101_c321_bs16x1_gbs16/latest.tar.gz
++  path_in_repo: boundary_mix_v2_v3/voc_semi662/s_ablation_bs16_a6000_20261103/a6000/s1_two_stage_random_k8/seed2/attempt01/r101_c321_bs16x1_gbs16/latest.tar.gz
+   squash_after_upload: false
+ saliency_cutmix:
+   enabled: true

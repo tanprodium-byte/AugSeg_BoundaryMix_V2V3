@@ -1,0 +1,44 @@
+[
+  {
+    "derived": "evidence/controls/baseline/epoch_metrics.csv",
+    "derived_sha256": "6de6fcd39fcbe7d91fde7a990cb410a9074b034dbce9d499e63630225656af07",
+    "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exp_boundary_mix_v2_v3/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/epoch_metrics.csv",
+    "source_sha256": "eb75a3d7b09626ef1b88a21205fe15934391388aebdb1cd7d37aa439dfd36c37",
+    "transformation": "column allowlist; remove paths and all other diagnostics; retain raw metric precision; normalize derived CSV line endings to LF"
+  },
+  {
+    "derived": "evidence/controls/baseline/iter_metrics.csv",
+    "derived_sha256": "a357aa73bd0d9e4cdbff38a8b02d7c0734b57ec88fad2fb49c69978aae452052",
+    "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exp_boundary_mix_v2_v3/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/iter_metrics.csv",
+    "source_sha256": "6fdde931e612bcc39d10f34dcf6fe42df298be711ee6ebcb41cb585ff981c1e7",
+    "transformation": "column allowlist; remove paths and all other diagnostics; retain raw metric precision; normalize derived CSV line endings to LF"
+  },
+  {
+    "derived": "runtime/saved-baseline-requirements.txt",
+    "dropped_lines": 0,
+    "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exps/boundary_mix_v2_v3/voc_semi662/baseline_augseg_fair80_c321_bs16x1_gbs16/log/wandb/run-20260911_084311-baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013/files/requirements.txt",
+    "source_sha256": "2fd96c036f38c51388d4a393a89948d95c699f51a43eed91adb99f56ead313f0",
+    "transformation": "keep only package==version, drop URLs/editable/path records"
+  },
+  {
+    "derived": "evidence/controls/s2/epoch_metrics.csv",
+    "derived_sha256": "1b064c97a8682dffa2b89e7e60143ab861677584063edc43b8c8ca89fa8eb188",
+    "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/s2_saliency_component_mask_relocated_cutmix_c321_bs16_legacy_c321_rerun01_rtx5090_r101_c321_bs16x1_gbs16_seed2_attempt01/epoch_metrics.csv",
+    "source_sha256": "69d019341cc3cdbe89ca0e00d766b7ba25921e6b719e9f7e4ac48c41c81ffc81",
+    "transformation": "column allowlist; remove paths and all other diagnostics; retain raw metric precision; normalize derived CSV line endings to LF"
+  },
+  {
+    "derived": "evidence/controls/s2/iter_metrics.csv",
+    "derived_sha256": "028c5d0d82dbc65ca1863c1cf2feeb8b3e96a44074adf2f86e5bebf3f5a9b0c5",
+    "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/s2_saliency_component_mask_relocated_cutmix_c321_bs16_legacy_c321_rerun01_rtx5090_r101_c321_bs16x1_gbs16_seed2_attempt01/iter_metrics.csv",
+    "source_sha256": "5828d9147144d9cc3a318a5c79bc55ade8a2018fa56e0f9ae091aeb6154bece4",
+    "transformation": "column allowlist; remove paths and all other diagnostics; retain raw metric precision; normalize derived CSV line endings to LF"
+  },
+  {
+    "derived": "runtime/saved-s2-requirements.txt",
+    "dropped_lines": 0,
+    "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exps/boundary_mix_v2_v3/voc_semi662_legacy_c321_rtx5090/s2_saliency_component_mask_relocated_cutmix_c321_bs16/log/wandb/run-20261002_223732-legacy5090_ca2417d3bfd520c5ada5a091/files/requirements.txt",
+    "source_sha256": "2fd96c036f38c51388d4a393a89948d95c699f51a43eed91adb99f56ead313f0",
+    "transformation": "keep only package==version, drop URLs/editable/path records"
+  }
+]

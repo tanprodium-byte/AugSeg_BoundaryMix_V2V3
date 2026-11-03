@@ -1,0 +1,116 @@
+{
+  "bs16_runtime_guard_review": {
+    "batch": 16,
+    "loaders": [
+      620,
+      620,
+      1449
+    ],
+    "scope": "only opt-in deployment contract guards; historical default methods unchanged",
+    "updates": 49600
+  },
+  "cohort": "s1_two_stage_k8_bs16_20261030",
+  "comparator_provenance": "Exact historical Git object + saved config/run_id/manifest + raw full80 epoch/iteration CSV + no-restore launch; historical clean worktree/input hashes UNKNOWN",
+  "control_execution_id": "baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013",
+  "control_hf_path": "boundary_mix_v2_v3/voc_semi662/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/r101_c321_bs16x1_gbs16/latest.tar.gz",
+  "control_hf_repo": "tanprodium/augseg-checkpoints",
+  "control_launch_log": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/.method_queue/u1_u4_simple/bbe2224c50db2c277e5d76dbb64f6527489d5b5c_seed2/logs/baseline_augseg_fair80_r101_c321_bs16x1_gbs16.attempt_1.log",
+  "control_metadata": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exps/boundary_mix_v2_v3/voc_semi662/baseline_augseg_fair80_c321_bs16x1_gbs16/log/wandb/run-20260911_084311-baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013/files/wandb-metadata.json",
+  "control_wandb_path": "tanprodium-uit/AugsegResearch/baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013",
+  "deployment_root": "/home/jupyter-iec2024iot04/augseg_deployments/s1_two_stage_k8_bs16_20261030",
+  "diff_format": "unified diff with normalized EOL for review; file_hashes cover exact bytes",
+  "fallback": "abort; zero-score softmax is uniform sampling, not an exception fallback",
+  "file_hashes": {
+    "AGENTS.md": "91b404ea27e3ce8b9eabbb56ca3a685b77898c20fb03927066b1669d27ba64d7",
+    "augseg/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "augseg/dataset/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "augseg/dataset/augs_ALIA.py": "443c5e367887e60e151454fabbb86127f5348c8ede67d9cd1fdc56dc7e6fa1e3",
+    "augseg/dataset/augs_TIBA.py": "8cd3092e55abde00fb547a2775207f22b6e3ac0dfe6bff1ec008390f49509573",
+    "augseg/dataset/base.py": "e232748584853557490ef02d53ae8fefbfc3329e377a9a5829f7d7a05fba3f7c",
+    "augseg/dataset/builder.py": "e7304985fb2bd310f777c092af191d8f0ed8e3d4c3276cab99f7073c173a2cd9",
+    "augseg/dataset/cityscapes.py": "2c8c3245ae4c318c0a8b5f4162477944662054fd096b5c6541a9ee26f1d0a1ce",
+    "augseg/dataset/pascal_voc.py": "ed5a23e9b6f14418675a70ea32b4ce19748f27a559224679775cce252a0efe82",
+    "augseg/models/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "augseg/models/decoder.py": "a7e5b1a4c048368d6155df7ff4ceadd403ade061f858dc5b1fa162261e81646a",
+    "augseg/models/model_helper.py": "3d383b72ad71a00b3d17bbacff53b63ef367966fc56e3327cc16a7823d722056",
+    "augseg/models/resnet.py": "2dc9386b9068bb1787e1c4dabd8723b0b4c65057340e4a89c5a9b6dd9058283b",
+    "augseg/utils/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "augseg/utils/dist_helper.py": "353a0bf4416b3dff423daf9e78cc42f3a9bd2755c227d1f88911ca566c12723b",
+    "augseg/utils/loss_helper.py": "cbd0f8a33ed0b5092db3a10f429957b55b627b19206e47b0a081d3e2fa43539b",
+    "augseg/utils/lr_helper.py": "8ff69f1fc6fe5a9d8f677018ee2a3453a93d207b9632c8baddfb84c8ddd9efa5",
+    "augseg/utils/utils.py": "bb39aafaa047cf10c1683381fece7ed3b9f7c5a7105fb70833586e4ab448b648",
+    "configs/experiment_registry_voc662_s1_two_stage_k8_bs16_20261030.yaml": "2eebd84ced7672191aca7e6051c4de34d8af717963fecdc79090b1e5d5058d1d",
+    "exps/boundary_mix_v2_v3/voc_semi662_s1_two_stage_k8_bs16_20261030/s1_two_stage_random_k8/config.yaml": "183b08c8908989ab6a9932d00b13ab5584443511c6b4ec801613cb5e5483c534",
+    "exps/boundary_mix_v2_v3/voc_semi662_s1_two_stage_k8_bs16_20261030/s1_two_stage_saliency_k8/config.yaml": "14af90e27b7e48230e605194b6d934ffbffe083fc6076320150a93c119e76a92",
+    "protected_deployments.json": "1e2b81e501e33366bd8411571eec1419f8bfdde21aba7ca6e48e2fec8625419d",
+    "scripts/run_s1_two_stage_k8.sh": "18638026c34076b96570fe5910ad5536355d81f8c64c5ce2c96e627f08bd89e0",
+    "source.diff": "694fdf579878478855bc749ab57a839cc2c4d40ebeb7865b4783c1bce6172caa",
+    "source_origins.json": "984aa6a6bc82f5d507eba4f72b104c9171d01a2c1fea509b0154e57098b7fef9",
+    "tools/s1_two_stage_cohort.py": "c1a20c5944212cf81496ad814a4e7a0bbefcf2f4742c9eea22b6f6fe9da90a7b",
+    "tools/test_s1_two_stage_k8.py": "10809867c0078f014d15dc34c907e31a76794203e3b371b3fe218428ccf8908e",
+    "tools/tracking_read_helpers.py": "56ca15f4d5d4e1f28ae0227b1b3ae963c2997814408a9f5291eeae9b0b97e2fb",
+    "tools/visualize_boundary_mix_debug.py": "8ab8e8b71442bd006244ac25583c73a3c91bf3017542d00cec3c0bd02e1e13df",
+    "train_semi.py": "6a6913fd6ec64a787db099de4e66d19a2d73d05c97ee2172d63645a1fdea8b87",
+    "util/boundary_compatibility.py": "019873deda4fd94c622c27bed078b3a1d171813930479e8db4fdf276fa475833",
+    "util/boundary_component.py": "83e88ae6d9c7ed7ee95e206689f6f8978fed848c20a655fea729edf065d14807",
+    "util/boundary_mix.py": "6295843e82b4da538405356ebebfa7f7d785671691f4f913493392324614ffe6",
+    "util/checkpointing.py": "ffad795d72d6b1e4fa5e25c1fa0e1a0617a23b3c934c59091988ab33e2c4c0da",
+    "util/csl_cutmix.py": "6cc934f113b365ed10baa833db0b1782babb0d42f54c7eb46f35b454c450d592",
+    "util/csl_official.py": "dc42291fe286a79aa93b73572a02135a841a29c28eb56f523f6aa021af817031",
+    "util/csl_reliability.py": "adf735579168e55ae4298c25b5833e3393bf6f7267ffb8bf313b6c4e7efbf711",
+    "util/hf_auto.py": "4e7431647bc425c512e8707fe248de700d8169bbf20fee0b9c5b06b2f6b1cb79",
+    "util/run_logging.py": "f1dbffd1afd304b7f6e9d0dbc681b75b682ef809b40b68f772daa171e1fb2aa6",
+    "util/saliency_cutmix.py": "45721ee81fa3ccc4c0fb88eb7d00989ab310b53662eb907a25131a2c083e7f0f",
+    "util/u1_saliency_u2u.py": "cbd64be58453cb63fca5188550ec35eba01aef2ecd9fca5acf2e117d59a22f3a"
+  },
+  "finalization_recovery_review": {
+    "previous_pin_archive": "/home/jupyter-iec2024iot04/.local/state/augseg-legacy-c321-rerun01-rtx5090-continuation/s_ablation_bs8_20261030/finalization_recovery_20261031T165956Z/before/augseg_deployments/s1_two_stage_k8_bs16_20261030/configs/s1_two_stage_k8_bs16_20261030_reviewed-deployment.json",
+    "previous_pin_sha256": "82dea38dc53870b465211637fd79a1ff0a7c0515df9d16a72c65ad0109b9a2c8",
+    "recovery_directory": "/home/jupyter-iec2024iot04/.local/state/augseg-legacy-c321-rerun01-rtx5090-continuation/s_ablation_bs8_20261030/finalization_recovery_20261031T165956Z",
+    "scope": "operational only; resolve bound trainer defaults and finite eps representation; scientific bytes unchanged"
+  },
+  "git_diff_sha256": "694fdf579878478855bc749ab57a839cc2c4d40ebeb7865b4783c1bce6172caa",
+  "git_worktree": false,
+  "historical_s1_reference_commits": [
+    "1a9387f",
+    "c47581b"
+  ],
+  "input_hashes": {
+    "data/splitsall/pascal_u2pl/662/labeled.txt": "7dada8ccc5eb6309b4b81e172dfc24f0d83ea72078675083778ca10487182748",
+    "data/splitsall/pascal_u2pl/662/unlabeled.txt": "49b06340ca1534c3f15001ea9ce6d2815dd2ae1302390cfbdcfc0b004e17d960",
+    "data/splitsall/pascal_u2pl/val.txt": "cdc1326d12f69ce5153aa5da04a4d8783e146868d42d19f82f44e74b97ac907d",
+    "pretrained/resnet101.pth": "d25b500a332e97a7bcbc11dc1153ec07c2f5c8334fbac2b36d882fe78a01af98"
+  },
+  "input_hashes_attested_at_setup_utc": "2026-10-30T17:02:29.634653+00:00",
+  "launch_policy": "reviewed sequential BS16 continuation after all BS8 receipts; fresh only; no training retry",
+  "protected_controls": {
+    "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/.method_queue/u1_u4_simple/bbe2224c50db2c277e5d76dbb64f6527489d5b5c_seed2/logs/baseline_augseg_fair80_r101_c321_bs16x1_gbs16.attempt_1.log": "0181b4a0dec3628b97f4f2e6facb4023e60c30051abf7ad31d3a41c931acab89",
+    "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exp_boundary_mix_v2_v3/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/config.yaml": "a17d5b97a142493bdddca027a3aa390cb339e1039a7074c3929ab63b860f2539",
+    "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exp_boundary_mix_v2_v3/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/epoch_metrics.csv": "eb75a3d7b09626ef1b88a21205fe15934391388aebdb1cd7d37aa439dfd36c37",
+    "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exp_boundary_mix_v2_v3/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/iter_metrics.csv": "6fdde931e612bcc39d10f34dcf6fe42df298be711ee6ebcb41cb585ff981c1e7",
+    "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exp_boundary_mix_v2_v3/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/manifest.json": "091daabccb476e00976738c4fb5bd108f57a2038559dad759ee74eaf16e176dd",
+    "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exp_boundary_mix_v2_v3/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/run_id.txt": "56848d08f9fd9c4fd9aec9145d08bfd82b2dd6387b9e7fb9f68c407fdfe5026e",
+    "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/exps/boundary_mix_v2_v3/voc_semi662/baseline_augseg_fair80_c321_bs16x1_gbs16/log/wandb/run-20260911_084311-baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013/files/wandb-metadata.json": "1e96538819eddfc507ce07418ae337827796dbcfb2671ed0d8c22d46c472af07"
+  },
+  "protected_r_entropy_pin_sha256": "1ae70a74ce2051b39c356165f89177913d3c25767ce990db4db0061449918a9c",
+  "random_k8_equal_compute": true,
+  "resource_preflight_review": {
+    "VRAM_capacity_guaranteed": false,
+    "compute_processes": "allowed",
+    "disk_min_bytes": 34359738368,
+    "gpu": "0",
+    "gpu_min_free_mib": 16384
+  },
+  "schema": 1,
+  "source_commit": "bbe2224c50db2c277e5d76dbb64f6527489d5b5c",
+  "source_commit_is_parent_only": true,
+  "completion_verification_recovery_review": {
+    "directory": "/home/jupyter-iec2024iot04/.local/state/augseg-legacy-c321-rerun01-rtx5090-continuation/s_ablation_bs8_20261030/completion_verification_recovery_20261101T114200Z",
+    "scientific_changes": false,
+    "operational_dependency_refresh": [
+      "/home/jupyter-iec2024iot04/.local/bin/augseg-s-ablation-queue.sh",
+      "/home/jupyter-iec2024iot04/.local/state/augseg-legacy-c321-rerun01-rtx5090-continuation/s_ablation_bs8_20261030/deployment.json"
+    ],
+    "previous_pin_sha256": "ffa8fa95e8b21a3e90cbbf7d391c95026e203cff64e41b620a80aff89be2d3fb"
+  }
+}

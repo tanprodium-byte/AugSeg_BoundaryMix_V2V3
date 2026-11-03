@@ -1,0 +1,6 @@
+{
+  "epoch": 79,
+  "git_commit": "bbe2224",
+  "run_id": "baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013",
+  "world_size": 1
+}

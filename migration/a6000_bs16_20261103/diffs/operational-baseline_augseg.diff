@@ -1,0 +1,106 @@
+--- historical/config.yaml
++++ sources/baseline/exps/baseline_augseg/config.yaml
+@@ -1,9 +1,9 @@
+-name: baseline_augseg_fair80_r101_c321_bs16x1_gbs16
++name: a6000_20261102T181658Z_baseline_augseg_441920d4
+ dataset:
+   type: pascal_semi
+   train:
+-    data_root: ./data/VOC2012
+-    data_list: ./data/splitsall/pascal_u2pl/662/labeled.txt
++    data_root: /home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012
++    data_list: /home/islabworker2/minhhb/tanvt/augseg_inputs/splits/662/labeled.txt
+     batch_size: 16
+     flip: true
+     rand_resize:
+@@ -19,8 +19,8 @@
+       num_augs: 3
+       flag_use_random_num_sampling: true
+   val:
+-    data_root: ./data/VOC2012
+-    data_list: ./data/splitsall/pascal_u2pl/val.txt
++    data_root: /home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012
++    data_list: /home/islabworker2/minhhb/tanvt/augseg_inputs/splits/val.txt
+     batch_size: 1
+   n_sup: 662
+   workers: 4
+@@ -55,9 +55,9 @@
+     use_cutmix_adaptive: true
+     use_cutmix_trigger_prob: 1.0
+ saver:
+-  auto_resume: true
+-  auto_profile_dir: true
+-  snapshot_dir: ../../../../exp_boundary_mix_v2_v3/baseline_augseg_fair80_r101_c321_bs16x1_gbs16
++  auto_resume: false
++  auto_profile_dir: false
++  snapshot_dir: /home/islabworker2/minhhb/tanvt/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_a6000/a6000_20261102T181658Z_baseline_augseg_441920d4
+   pretrain: ''
+   use_tb: false
+ criterion:
+@@ -70,7 +70,7 @@
+   ema_decay: 0.999
+   encoder:
+     type: augseg.models.resnet.resnet101
+-    pretrain: ./pretrained/resnet101.pth
++    pretrain: /home/islabworker2/minhhb/tanvt/augseg_inputs/pretrained/resnet101.pth
+     kwargs:
+       zero_init_residual: true
+       multi_grid: true
+@@ -89,29 +89,46 @@
+       - 18
+ wandb:
+   enable: true
+-  project: AugsegResearch
++  project: AugsegLegacyC321Rerun01-RTX5090
+   entity: tanprodium-uit
+-  name: baseline_augseg_fair80_r101_c321_bs16x1_gbs16
++  name: a6000_20261102T181658Z_baseline_augseg_441920d4
+   log_every: 50
++  mode: online
++  group: s_ablation_bs16_a6000_20261103
++  resume: never
++  tags:
++  - a6000
++  - bs16
++  - seed:2
++  - fresh80
++  - baseline_augseg
++  - control:baseline-bs16
+ run:
+-  name: baseline_augseg_fair80_r101_c321_bs16x1_gbs16
++  name: a6000_20261102T181658Z_baseline_augseg_441920d4
+   log_every: 50
++  suite_id: s_ablation_bs16_a6000_20261103
++  control_execution_id: baseline_augseg_fair80_r101_c321_bs16x1_gbs16_20260911_084310_2a37d013
++  source_parent_commit: bbe2224c50db2c277e5d76dbb64f6527489d5b5c
++  deployment_root: /home/islabworker2/minhhb/tanvt/augseg_deployments/baseline_bs16_a6000_20261103
++  cohort_baseline_execution_id: a6000_20261102T181658Z_baseline_augseg_441920d4
++  source_pin_sha256: 20a5030448e1256bd856937820ce311090bc1121729634887e1e1741d2714ff6
++  migration_package_id: s_ablation_bs16_a6000_20261103
+ checkpoint:
+-  auto_resume: true
++  auto_resume: false
+   save_latest: true
+   save_best: true
+ hf:
+   enabled: true
+-  auto_profile_path: true
+-  repo_id: tanprodium/augseg-checkpoints
++  auto_profile_path: false
++  repo_id: tanprodium/augseg-legacy-c321-rerun01-rtx5090
+   repo_type: model
+-  auto_download: true
+-  auto_upload: true
+-  upload_every_epoch: true
++  auto_download: false
++  auto_upload: false
++  upload_every_epoch: false
+   keep_only_latest: true
+   bundle_name: latest.tar.gz
+-  path_in_repo: boundary_mix_v2_v3/voc_semi662/baseline_augseg_fair80_r101_c321_bs16x1_gbs16/latest.tar.gz
+-  squash_after_upload: true
++  path_in_repo: boundary_mix_v2_v3/voc_semi662/s_ablation_bs16_a6000_20261103/a6000/baseline_augseg/seed2/attempt01/r101_c321_bs16x1_gbs16/latest.tar.gz
++  squash_after_upload: false
+ saliency_cutmix:
+   enabled: false
+ fixed_size_csl_destination:

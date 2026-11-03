@@ -1,0 +1,4 @@
+# Preserve immutable source bytes, including historical trailing whitespace.
+historical/** -text -whitespace
+sources/** -text -whitespace
+diffs/** -text -whitespace

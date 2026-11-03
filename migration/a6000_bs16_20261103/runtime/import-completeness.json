@@ -1,0 +1,30 @@
+{
+  "external_import_roots": [
+    "PIL",
+    "cv2",
+    "huggingface_hub",
+    "numpy",
+    "pandas",
+    "scipy",
+    "skimage",
+    "torch",
+    "torchvision",
+    "wandb",
+    "yaml"
+  ],
+  "distribution_mapping": {
+    "PIL": "Pillow",
+    "cv2": "opencv-python",
+    "huggingface_hub": "huggingface-hub",
+    "numpy": "numpy",
+    "pandas": "pandas",
+    "scipy": "scipy",
+    "skimage": "scikit-image",
+    "torch": "torch",
+    "torchvision": "torchvision",
+    "wandb": "wandb",
+    "yaml": "PyYAML"
+  },
+  "all_direct_imports_covered_by_pinned_requirements": true,
+  "no_trainer_module_imported": true
+}

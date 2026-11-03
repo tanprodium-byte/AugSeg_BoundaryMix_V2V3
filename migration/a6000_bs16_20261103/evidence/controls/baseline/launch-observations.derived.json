@@ -1,0 +1,75 @@
+{
+  "derived": true,
+  "observations": [
+    {
+      "source_line": 240,
+      "text": "[2026-09-11 08:43:15,184][INFO] - -------------------------- start training --------------------------"
+    },
+    {
+      "source_line": 241,
+      "text": "[2026-09-11 08:43:50,607][INFO] - Epoch/Iter [80:  0/ 77].  Sup:0.892(0.939)  Uns:0.040(0.091)  Pseudo:0.143(0.222)  Time:0.44  LR:0.00012"
+    },
+    {
+      "source_line": 242,
+      "text": "[2026-09-11 08:44:20,371][INFO] - Epoch/Iter [80:  0/154].  Sup:0.656(0.627)  Uns:0.173(0.106)  Pseudo:0.265(0.298)  Time:0.33  LR:0.00012"
+    },
+    {
+      "source_line": 243,
+      "text": "[2026-09-11 08:44:45,443][INFO] - Epoch/Iter [80:  0/231].  Sup:0.701(0.493)  Uns:0.134(0.126)  Pseudo:0.422(0.368)  Time:0.33  LR:0.00012"
+    },
+    {
+      "source_line": 244,
+      "text": "[2026-09-11 08:45:11,956][INFO] - Epoch/Iter [80:  0/308].  Sup:0.354(0.415)  Uns:0.104(0.164)  Pseudo:0.400(0.406)  Time:0.40  LR:0.00012"
+    },
+    {
+      "source_line": 245,
+      "text": "[2026-09-11 08:45:45,910][INFO] - Epoch/Iter [80:  0/385].  Sup:0.323(0.427)  Uns:0.189(0.153)  Pseudo:0.528(0.542)  Time:0.44  LR:0.00012"
+    },
+    {
+      "source_line": 246,
+      "text": "[2026-09-11 08:46:19,876][INFO] - Epoch/Iter [80:  0/462].  Sup:0.272(0.339)  Uns:0.157(0.147)  Pseudo:0.433(0.484)  Time:0.44  LR:0.00012"
+    },
+    {
+      "source_line": 247,
+      "text": "[2026-09-11 08:46:53,837][INFO] - Epoch/Iter [80:  0/539].  Sup:0.302(0.308)  Uns:0.292(0.208)  Pseudo:0.572(0.506)  Time:0.44  LR:0.00012"
+    },
+    {
+      "source_line": 248,
+      "text": "[2026-09-11 08:47:29,130][INFO] - Epoch/Iter [80:  0/619].  Sup:0.363(0.337)  Uns:0.407(0.207)  Pseudo:0.599(0.545)  Time:0.44  LR:0.00012"
+    },
+    {
+      "source_line": 74124,
+      "text": "[2026-09-11 15:41:49,367][INFO] - Epoch/Iter [80: 79/ 77].  Sup:0.055(0.058)  Uns:0.162(0.143)  Pseudo:0.859(0.851)  Time:0.21  LR:0.00000"
+    },
+    {
+      "source_line": 74125,
+      "text": "[2026-09-11 15:42:05,654][INFO] - Epoch/Iter [80: 79/154].  Sup:0.072(0.062)  Uns:0.130(0.127)  Pseudo:0.891(0.864)  Time:0.21  LR:0.00000"
+    },
+    {
+      "source_line": 74126,
+      "text": "[2026-09-11 15:42:21,949][INFO] - Epoch/Iter [80: 79/231].  Sup:0.082(0.054)  Uns:0.076(0.124)  Pseudo:0.849(0.861)  Time:0.21  LR:0.00000"
+    },
+    {
+      "source_line": 74127,
+      "text": "[2026-09-11 15:42:38,241][INFO] - Epoch/Iter [80: 79/308].  Sup:0.105(0.060)  Uns:0.211(0.166)  Pseudo:0.861(0.847)  Time:0.21  LR:0.00000"
+    },
+    {
+      "source_line": 74128,
+      "text": "[2026-09-11 15:42:54,542][INFO] - Epoch/Iter [80: 79/385].  Sup:0.064(0.060)  Uns:0.142(0.135)  Pseudo:0.902(0.850)  Time:0.21  LR:0.00000"
+    },
+    {
+      "source_line": 74129,
+      "text": "[2026-09-11 15:43:10,849][INFO] - Epoch/Iter [80: 79/462].  Sup:0.064(0.063)  Uns:0.111(0.126)  Pseudo:0.800(0.845)  Time:0.21  LR:0.00000"
+    },
+    {
+      "source_line": 74130,
+      "text": "[2026-09-11 15:43:27,159][INFO] - Epoch/Iter [80: 79/539].  Sup:0.044(0.063)  Uns:0.075(0.136)  Pseudo:0.841(0.846)  Time:0.21  LR:0.00000"
+    },
+    {
+      "source_line": 74131,
+      "text": "[2026-09-11 15:43:44,091][INFO] - Epoch/Iter [80: 79/619].  Sup:0.056(0.056)  Uns:0.065(0.133)  Pseudo:0.862(0.857)  Time:0.21  LR:0.00000"
+    }
+  ],
+  "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3/.method_queue/u1_u4_simple/bbe2224c50db2c277e5d76dbb64f6527489d5b5c_seed2/logs/baseline_augseg_fair80_r101_c321_bs16x1_gbs16.attempt_1.log",
+  "source_sha256": "0181b4a0dec3628b97f4f2e6facb4023e60c30051abf7ad31d3a41c931acab89"
+}

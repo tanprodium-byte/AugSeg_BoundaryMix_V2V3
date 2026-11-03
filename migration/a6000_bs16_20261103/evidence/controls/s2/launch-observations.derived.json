@@ -1,0 +1,75 @@
+{
+  "derived": true,
+  "observations": [
+    {
+      "source_line": 239,
+      "text": "[2026-10-02 22:37:36,246][INFO] - -------------------------- start training --------------------------"
+    },
+    {
+      "source_line": 242,
+      "text": "[2026-10-02 22:39:47,275][INFO] - Epoch/Iter [80:  0/ 77].  Sup:0.891(0.926)  Uns:0.271(0.263)  Pseudo:0.312(0.298)  Time:1.69  LR:0.00012"
+    },
+    {
+      "source_line": 245,
+      "text": "[2026-10-02 22:41:08,675][INFO] - Epoch/Iter [80:  0/154].  Sup:0.610(0.617)  Uns:0.164(0.248)  Pseudo:0.263(0.348)  Time:0.97  LR:0.00012"
+    },
+    {
+      "source_line": 247,
+      "text": "[2026-10-02 22:42:16,278][INFO] - Epoch/Iter [80:  0/231].  Sup:0.685(0.489)  Uns:0.221(0.205)  Pseudo:0.443(0.402)  Time:0.82  LR:0.00012"
+    },
+    {
+      "source_line": 250,
+      "text": "[2026-10-02 22:43:23,379][INFO] - Epoch/Iter [80:  0/308].  Sup:0.357(0.419)  Uns:0.242(0.220)  Pseudo:0.396(0.429)  Time:0.87  LR:0.00012"
+    },
+    {
+      "source_line": 252,
+      "text": "[2026-10-02 22:44:30,609][INFO] - Epoch/Iter [80:  0/385].  Sup:0.289(0.419)  Uns:0.185(0.252)  Pseudo:0.539(0.553)  Time:0.88  LR:0.00012"
+    },
+    {
+      "source_line": 255,
+      "text": "[2026-10-02 22:45:51,892][INFO] - Epoch/Iter [80:  0/462].  Sup:0.262(0.337)  Uns:0.144(0.235)  Pseudo:0.416(0.519)  Time:1.19  LR:0.00012"
+    },
+    {
+      "source_line": 257,
+      "text": "[2026-10-02 22:47:42,035][INFO] - Epoch/Iter [80:  0/539].  Sup:0.296(0.307)  Uns:0.282(0.237)  Pseudo:0.588(0.523)  Time:1.29  LR:0.00012"
+    },
+    {
+      "source_line": 261,
+      "text": "[2026-10-02 22:49:39,579][INFO] - Epoch/Iter [80:  0/619].  Sup:0.406(0.337)  Uns:0.479(0.285)  Pseudo:0.650(0.570)  Time:1.50  LR:0.00012"
+    },
+    {
+      "source_line": 5330,
+      "text": "[2026-10-03 13:58:57,260][INFO] - Epoch/Iter [80: 79/ 77].  Sup:0.052(0.057)  Uns:0.109(0.137)  Pseudo:0.858(0.866)  Time:1.31  LR:0.00000"
+    },
+    {
+      "source_line": 5332,
+      "text": "[2026-10-03 14:00:40,293][INFO] - Epoch/Iter [80: 79/154].  Sup:0.066(0.062)  Uns:0.122(0.112)  Pseudo:0.897(0.866)  Time:1.37  LR:0.00000"
+    },
+    {
+      "source_line": 5335,
+      "text": "[2026-10-03 14:02:23,000][INFO] - Epoch/Iter [80: 79/231].  Sup:0.084(0.053)  Uns:0.170(0.123)  Pseudo:0.853(0.875)  Time:1.33  LR:0.00000"
+    },
+    {
+      "source_line": 5337,
+      "text": "[2026-10-03 14:04:06,917][INFO] - Epoch/Iter [80: 79/308].  Sup:0.080(0.058)  Uns:0.238(0.138)  Pseudo:0.859(0.872)  Time:1.39  LR:0.00000"
+    },
+    {
+      "source_line": 5340,
+      "text": "[2026-10-03 14:05:49,823][INFO] - Epoch/Iter [80: 79/385].  Sup:0.064(0.058)  Uns:0.066(0.121)  Pseudo:0.899(0.863)  Time:1.35  LR:0.00000"
+    },
+    {
+      "source_line": 5342,
+      "text": "[2026-10-03 14:07:33,683][INFO] - Epoch/Iter [80: 79/462].  Sup:0.068(0.062)  Uns:0.110(0.099)  Pseudo:0.817(0.864)  Time:1.37  LR:0.00000"
+    },
+    {
+      "source_line": 5345,
+      "text": "[2026-10-03 14:09:18,551][INFO] - Epoch/Iter [80: 79/539].  Sup:0.042(0.060)  Uns:0.075(0.117)  Pseudo:0.882(0.864)  Time:1.38  LR:0.00000"
+    },
+    {
+      "source_line": 5348,
+      "text": "[2026-10-03 14:11:06,947][INFO] - Epoch/Iter [80: 79/619].  Sup:0.055(0.056)  Uns:0.065(0.112)  Pseudo:0.884(0.876)  Time:1.36  LR:0.00000"
+    }
+  ],
+  "source": "/home/jupyter-iec2024iot04/.local/state/augseg-legacy-c321-rerun01-rtx5090/ac172baf0cfd07f314a6d0614bfd1cf045036ea1_seed2/s2_saliency_component_mask_relocated_cutmix_c321_bs16.train.log",
+  "source_sha256": "e8ba8cc3c8a466862f129a7dd68d6ef9a18a683c214748d941bc8a6c3b840d8a"
+}

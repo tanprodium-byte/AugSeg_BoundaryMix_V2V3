@@ -1,0 +1,10 @@
+{
+  "cudaVersion": "13.0",
+  "git": {
+    "commit": "9047b1a235541917d77f133401a2547651e7c0e1",
+    "remote": "https://github.com/tanprodium-byte/AugSeg_BoundaryMix_V2V3.git"
+  },
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "os": "Linux-6.8.0-142-generic-x86_64-with-glibc2.39",
+  "python": "CPython 3.11.15"
+}

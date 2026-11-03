@@ -1,0 +1,233 @@
+--- a/train_semi.py
++++ b/train_semi.py
+@@ -44,6 +44,8 @@
+     get_saliency_component_guided_boxes,
+     get_saliency_component_guided_masks,
+     get_saliency_guided_boxes,
++    validate_s2_area_only_config,
++    actual_gt_paste_stats,
+ )
+ from util.u1_saliency_u2u import (
+     NUM_CANDIDATES as U1_NUM_CANDIDATES,
+@@ -589,7 +591,15 @@
+         set_random_seed(args.seed, deterministic=True)
+         # set_random_seed(args.seed)
+     cfg = yaml.load(open(args.config, "r"), Loader=yaml.Loader)
++    s2_area_only = validate_s2_area_only_config(cfg)
++    if s2_area_only:
++        os.environ["WANDB_MODE"] = "online"
++        ITER_LOG_COLUMNS.extend(["saliency/component_score_mode_id", "s2/gt_origin_pixels", "s2/valid_gt_origin_pixels",
++            "s2/ignore_gt_origin_pixels", "s2/grid_pixels", "s2/gt_origin_fraction", "s2/valid_gt_origin_fraction",
++            "s2/ignore_gt_origin_fraction", "s2/mixed_sample_fraction", "s2/component_fallback_sample_fraction", "s2/mixing_stages"])
+     rank, word_size = setup_distributed(port=args.port)
++    if s2_area_only and (word_size != 1 or args.seed != 2):
++        raise RuntimeError("S2 area-only requires world1 and seed2")
+ 
+     # ✅ đặt ở đây
+     if rank != 0:
+@@ -893,6 +903,14 @@
+             if suite_id and suite_id not in wandb_tags:
+                 wandb_tags.append(suite_id)
+ 
++            if s2_area_only:
++                import json
++                with open(os.path.join(cfg["save_path"], "provenance.json")) as stream:
++                    source_provenance = json.load(stream)
++                if source_provenance["execution_id"] != run_id or source_provenance["deployment_root"] != os.getcwd():
++                    raise RuntimeError("S2 deployment/execution provenance mismatch")
++                cfg["run"]["source_pin_sha256"] = source_provenance["source_pin_sha256"]
++                cfg["run"]["source_diff_sha256"] = source_provenance["git_diff_sha256"]
+             wandb_run = wandb.init(
+                 project=wandb_cfg.get("project", "augseg-voc662"),
+                 entity=wandb_cfg.get("entity", None),
+@@ -905,6 +923,8 @@
+                 dir=cfg["log_path"],
+                 settings=wandb.Settings(start_method="thread"),
+             )
++            if s2_area_only and (wandb_run.id != run_id or wandb_run.resumed or wandb_run.settings.mode != "online"):
++                raise RuntimeError("S2 area-only requires exact fresh online W&B identity")
+ 
+     # make sure all folders and csv handler are correctly created on rank ==0.
+     dist.barrier(device_ids=[local_rank])
+@@ -926,6 +946,8 @@
+     ###########################
+     sup_loss_fn = get_criterion(cfg)
+     train_loader_sup, train_loader_unsup, val_loader = get_loader(cfg, seed=args.seed)
++    if s2_area_only and (len(train_loader_sup), len(train_loader_unsup), len(val_loader)) != (620, 620, 1449):
++        raise RuntimeError("S2 area-only requires loaders 620/620/1449 and fixed49600 horizon")
+ 
+     ##############################
+     # 4. optimizer & scheduler
+@@ -1256,6 +1278,11 @@
+                 "world_size": word_size,
+                 "git_commit": get_git_commit("."),
+             }
++            if s2_area_only:
++                manifest.update(source_parent_commit=cfg["run"]["source_parent_commit"],
++                    source_pin_sha256=cfg["run"]["source_pin_sha256"], source_diff_sha256=cfg["run"]["source_diff_sha256"],
++                    source_is_snapshot=True, s2_component_score=cfg["saliency_cutmix"]["component_score"],
++                    s2_fallback_policy="random_box_no_eligible;abort_selector_exception")
+             write_json(log_paths["manifest"], manifest)
+             append_csv_row(log_paths["epoch_csv"], manifest)
+ 
+@@ -1351,6 +1378,7 @@
+     boundary_compatibility_debug_enabled = bool(boundary_compatibility_cfg.get("debug_log", False))
+     saliency_cutmix_cfg = cfg.get("saliency_cutmix", {})
+     saliency_cutmix_enabled = bool(saliency_cutmix_cfg.get("enabled", False))
++    s2_area_only = validate_s2_area_only_config(cfg)
+     saliency_cutmix_debug_enabled = bool(saliency_cutmix_cfg.get("debug_log", False))
+     u1_cfg = cfg.get("u1_saliency_u2u", {})
+     u1_enabled = bool(u1_cfg.get("enabled", False))
+@@ -1544,6 +1572,7 @@
+         csl_weight_u = None
+         csl_reliable_mask_u = None
+         saliency_selector_exception_batch = 0
++        s2_paste_stats = None
+         relocation_diagnostics = None
+         destination_kwargs = {}
+         if s2_relocated_policy_active:
+@@ -1778,10 +1807,13 @@
+                                 foreground_only=bool(saliency_cutmix_cfg.get("foreground_only", True)),
+                                 min_component_area=int(saliency_cutmix_cfg.get("min_component_area", 64)),
+                                 max_component_area=int(saliency_cutmix_cfg.get("max_component_area", 20000)),
++                                component_score=saliency_cutmix_cfg.get("component_score", "mean_saliency_area"),
+                             )
+                         else:
+                             raise ValueError("Unsupported saliency_cutmix.mode: %s" % saliency_mode)
+                     except Exception as exc:
++                        if saliency_cutmix_cfg.get("component_score") == "area_only":
++                            raise RuntimeError("S2 selector exception; abort before any two-stage fallback") from exc
+                         saliency_selector_exception_batch = 1
+                         saliency_labeled_boxes = None
+                         saliency_labeled_masks = None
+@@ -2019,6 +2051,12 @@
+                         )
+                     u1_diagnostics_accumulator.reset_()
+ 
++                if s2_area_only and do_log_now:
++                    if saliency_labeled_masks is None:
++                        raise RuntimeError("S2 area-only requires one-stage exact-mask path")
++                    s2_paste_stats = actual_gt_paste_stats(
++                        mix_source_mask, label_u_aug, saliency_stats["saliency/fallback_ratio"], ignore_index=ignore)
++
+                 if label_u_before is not None:
+                     ar_area_ratio_est = (label_u_aug != label_u_before).float().mean().item()
+                     del label_u_before
+@@ -2662,6 +2700,8 @@
+                         "relocation_mean_source_destination_iou": float(relocation_diagnostics["relocation_source_destination_iou_sum"]) / relocation_denominator if relocation_draw_count > 0 else 0.0,
+                     })
+                 log_dict["saliency_selector_exception_batch"] = int(saliency_selector_exception_batch)
++                if s2_paste_stats is not None:
++                    log_dict.update(s2_paste_stats)
+ 
+                 if csl_enabled:
+                     csl_mode_value = {
+--- a/util/run_logging.py
++++ b/util/run_logging.py
+@@ -54,6 +54,18 @@
+ 
+ 
+ def get_git_commit(repo_root: str | Path = ".") -> str:
++    # This isolated deployment has no .git directory. The parent commit is only
++    # a label; source_pin/source_diff in each manifest identify the actual source.
++    pin_path = os.environ.get("AUGSEG_DEPLOYMENT_PIN")
++    if pin_path:
++        import hashlib
++        payload = Path(pin_path).read_bytes()
++        pin = json.loads(payload)
++        if (hashlib.sha256(payload).hexdigest() != os.environ.get("AUGSEG_DEPLOYMENT_PIN_SHA256")
++                or Path(pin["deployment_root"]) != Path(__file__).resolve().parents[1]
++                or pin["file_hashes"]["util/run_logging.py"] != hashlib.sha256(Path(__file__).read_bytes()).hexdigest()):
++            raise RuntimeError("isolated source attestation mismatch")
++        return pin["source_commit"][:7]
+     try:
+         out = subprocess.check_output(
+             ["git", "rev-parse", "--short", "HEAD"],
+--- a/util/saliency_cutmix.py
++++ b/util/saliency_cutmix.py
+@@ -400,7 +400,11 @@
+     foreground_only=True,
+     min_component_area=64,
+     max_component_area=20000,
++    component_score="mean_saliency_area",
+ ):
++    if component_score not in ("mean_saliency_area", "area_only"):
++        raise ValueError("unsupported component-mask score policy")
++    # Keep the teacher saliency computation for the area-only ablation too.
+     saliency = compute_labeled_teacher_saliency(
+         teacher,
+         source_images,
+@@ -440,7 +444,7 @@
+             mask = torch.as_tensor(component["mask"], device=saliency.device, dtype=torch.bool)
+             sal_score = float(saliency[b][mask].mean().item()) if mask.any() else 0.0
+             area_score = float(component["area"]) / float(max(height * width, 1))
+-            score = sal_score * area_score
++            score = area_score if component_score == "area_only" else sal_score * area_score
+             records.append({**component, "saliency_score": sal_score, "area_score": area_score, "score": score})
+ 
+         component_records.append(records)
+@@ -467,6 +471,8 @@
+         )
+ 
+     stats = _component_stats(component_records, selected_records, fallback_count, batch)
++    if component_score == "area_only":
++        stats["saliency/component_score_mode_id"] = 1.0
+     return selected_masks.detach().to(device=source_images.device, dtype=torch.bool), stats
+ 
+ 
+@@ -517,3 +523,55 @@
+         if x2 > x1 and y2 > y1:
+             masks[b, x1:x2, y1:y2] = 1.0
+     return masks
++
++
++def validate_s2_area_only_config(cfg):
++    """Opt-in checks; absent new score key preserves historical defaults."""
++    s = cfg.get("saliency_cutmix", {})
++    if s.get("component_score", "mean_saliency_area") != "area_only":
++        return False
++    expected = {"enabled": True, "mode": "component_mask", "direct_labeled_mix": True,
++        "direct_paste_policy": "component_mask_random_valid_destination", "paste_mode": "mask",
++        "component_source": "labeled_gt", "connectivity": 8, "foreground_only": True,
++        "ignore_label": 255, "min_component_area": 64, "max_component_area": 20000,
++        "temperature": .2, "selection": "softmax", "fallback": "random_box",
++        "saliency_model": "teacher", "saliency_loss": "supervised_ce", "saliency_mode": "grad",
++        "detach_saliency": True, "use_saliency_for_loss_weight": False, "use_saliency_conf_product": False}
++    for key, value in expected.items():
++        if s.get(key) != value:
++            raise ValueError("S2 area-only contract mismatch: " + key)
++    if s.get("direct_confidence_gate", False) or s.get("eps", 1e-6) != 1e-6:
++        raise ValueError("S2 area-only must retain no gate and epsilon1e-6")
++    for key in ("csl", "csl_cutmix", "fixed_size_csl_destination", "boundary_component",
++                "boundary_compatibility", "boundary_mix", "u1_saliency_u2u",
++                "u2_cross_view_saliency_u2u", "u3_confidence_filtered_cross_view_saliency_u2u",
++                "u4_confidence_filtered_self_pseudo_saliency_u2u"):
++        if cfg.get(key, {}).get("enabled", False):
++            raise ValueError("S2 area-only forbids extra branch: " + key)
++    t = cfg["trainer"]; d = cfg["dataset"]
++    if (t["epochs"], t.get("sup_only_epoch", 0), d["n_sup"], d["train"]["batch_size"], d["train"]["crop"]["size"]) != (80, 0, 662, 16, [321,321]):
++        raise ValueError("S2 area-only requires fixed80 VOC662/C321/B16")
++    u = t["unsupervised"]
++    if (u["threshold"], u["loss_weight"], u.get("flag_extra_weak", False), u["use_cutmix"], u["use_cutmix_adaptive"], u["use_cutmix_trigger_prob"]) != (.95, 1., False, True, True, 1.):
++        raise ValueError("S2 area-only must retain baseline CE/BHW and trigger")
++    return True
++
++
++def actual_gt_paste_stats(origin, mixed_target, fallback_ratio, ignore_index=255):
++    """Exact post-mix GT-origin counts, including ignored GT, before CE filtering.
++
++    This reads the provenance mask returned by the production mixer; it does not
++    infer paste area from changed labels. No sampling or mutation occurs here.
++    """
++    if origin.shape != mixed_target.shape:
++        raise ValueError("GT-origin/target shape mismatch")
++    gt = origin.detach().gt(.5)
++    valid = mixed_target.detach().ne(ignore_index)
++    total = gt.numel()
++    count = int(gt.sum().item()); good = int((gt & valid).sum().item())
++    return {"s2/gt_origin_pixels": count, "s2/valid_gt_origin_pixels": good,
++        "s2/ignore_gt_origin_pixels": count-good, "s2/grid_pixels": total,
++        "s2/gt_origin_fraction": count/total, "s2/valid_gt_origin_fraction": good/total,
++        "s2/ignore_gt_origin_fraction": (count-good)/total,
++        "s2/mixed_sample_fraction": float(gt.flatten(1).any(1).float().mean().item()),
++        "s2/component_fallback_sample_fraction": float(fallback_ratio), "s2/mixing_stages": 1.0}
