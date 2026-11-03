@@ -31,7 +31,9 @@ class Operations(unittest.TestCase):
         self.assertEqual(c.ORIGINS['sources']['s2']['parent_commit'],'9047b1a235541917d77f133401a2547651e7c0e1')
         self.assertTrue((PKG/'historical/git_exports/9047b1a235541917d77f133401a2547651e7c0e1/train_semi.py').is_file())
     def test_wrong_target_bootstrap_fails_before_write(self):
-        with mock.patch.object(c.shutil,'copytree') as cp:
+        # Deliberately use a wrong package location on every host, including A6000.
+        # Never rely on the real host being different from production.
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(c,'PKG',Path(td)), mock.patch.object(c,'check_package'), mock.patch.object(c.shutil,'copytree') as cp:
             with self.assertRaises(c.CohortError):c.bootstrap()
             cp.assert_not_called()
     def test_tags_and_fresh_online_only(self):

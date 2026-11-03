@@ -1,0 +1,29 @@
+{
+  "archive_layout_unchanged": true,
+  "configs": {
+    "baseline_augseg": {
+      "new_sha256": "3319caa04aa8919aabd2f5c9a010421d447f1b8b37e9690d1a6e66565e32b8b6",
+      "old_sha256": "a6c5e1611b9105e79a205d6b4f28c88e5f247bb28caf190f628799cfb5feb1f2",
+      "package_config": "sources/baseline/exps/baseline_augseg/config.yaml"
+    },
+    "s1_two_stage_random_k8": {
+      "new_sha256": "6f5142560b36902a47e67e3f280dcde4eeaa356cf3f0cfb647e810df4cd75dba",
+      "old_sha256": "0874c018098459e9cce9aab6727c2f017bce520c749aeedbcee1b723cbfeb496",
+      "package_config": "sources/s1/exps/s1_two_stage_random_k8/config.yaml"
+    },
+    "s1_two_stage_saliency_k8": {
+      "new_sha256": "0b69024d66f9f37b080a751324749c6524dedd8038458e030b2783f1695e25ef",
+      "old_sha256": "0501d3c80fb476f94e8087846f9bf2852d5e28912383e6c971c594fe4ea05f92",
+      "package_config": "sources/s1/exps/s1_two_stage_saliency_k8/config.yaml"
+    },
+    "s2_mask_relocated_area_only": {
+      "new_sha256": "093ee660ef25acb650224f7e4999ad20559b3c8fdae09381a0e2fe5c0b29e7ef",
+      "old_sha256": "4099a58e40998f206e87c4d3e2c13f4344f0168d77ba9029fc11423418e1c6f7",
+      "package_config": "sources/s2/exps/s2_mask_relocated_area_only/config.yaml"
+    }
+  },
+  "from_commit": "9882df210b273cffe09edc37d864f44cddb9dcaf",
+  "registry_sha256": "b7685457c9e814863b6c1b10727e109c93d6ae8dc8e24567dc3c4d971270daa7",
+  "scope": "operational input-path correction only; historical pins and scientific sources unchanged",
+  "source_pins_unchanged": true
+}

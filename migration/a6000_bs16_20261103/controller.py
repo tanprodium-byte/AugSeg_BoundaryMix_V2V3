@@ -9,6 +9,9 @@ from pathlib import Path
 PKG=Path(__file__).resolve().parent
 REG=json.loads((PKG/'registry.json').read_text())
 ORIGINS=json.loads((PKG/'origins.json').read_text())
+SPLIT_SPECS=(('splits/pascal/662/labeled.txt','splits/662/labeled.txt',662),
+             ('splits/pascal/662/unlabeled.txt','splits/662/unlabeled.txt',9920),
+             ('splits/pascal/val.txt','splits/val.txt',1449))
 class CohortError(RuntimeError): pass
 def require(v,m):
     if not v: raise CohortError(m)
@@ -45,6 +48,8 @@ def check_package():
     require(REG['target_root']=='/home/islabworker2/minhhb/tanvt','wrong tanvt root')
     require(len(profiles())==4 and len({r['run_id'] for r in profiles()})==4,'identity count/collision')
     require(len({r['output'] for r in profiles()})==4 and len({r['hf_path'] for r in profiles()})==4,'output/HF collision')
+    upgrade=read(PKG/'upgrades/input-paths-from-9882df21.json')
+    require(upgrade['from_commit']=='9882df210b273cffe09edc37d864f44cddb9dcaf' and sha_file(PKG/'registry.json')==upgrade['registry_sha256'],'upgrade identity/parent mismatch')
     for kind,s in ORIGINS['sources'].items():
         for rel,h in s['source_files'].items():
             require(sha_file(PKG/'sources'/kind/rel)==h,'source changed: '+kind+'/'+rel)
@@ -55,6 +60,9 @@ def check_package():
         require(sha_file(p)==ORIGINS['sources'][k]['historical_pin_sha256'],'historical pin overwritten')
     for r in profiles():
         c=expected_config(r)
+        require(sha_file(PKG/r['package_config'])==upgrade['configs'][r['method']]['new_sha256'],'portable config pin mismatch')
+        input_root=Path(REG['target_root'])/'augseg_inputs'
+        require(c['dataset']['train']['data_list']==str(input_root/SPLIT_SPECS[0][0]) and c['dataset']['val']['data_list']==str(input_root/SPLIT_SPECS[2][0]),'loader-compatible split paths required')
         require(c['dataset']['train']['batch_size']==16 and c['dataset']['n_sup']==662,'batch/split mismatch')
         require(c['dataset']['train']['crop']['size']==[321,321] and c['trainer']['epochs']==80 and c['trainer']['sup_only_epoch']==0,'protocol mismatch')
         require(r['updates']==49600 and r['iterations_per_epoch']==620 and r['world_size']==1 and r['seed']==2,'fixed80 protocol')
@@ -132,13 +140,59 @@ def inputs():
     require(root.is_dir(),'VOC2012 missing')
     for v in info['dataset']['required_directories']:require((root/v).is_dir(),'dataset directory missing '+v)
     # Check referenced images/labels exist, without decoding images or tensors.
-    for rel,n in [('splits/662/labeled.txt',662),('splits/662/unlabeled.txt',9920),('splits/val.txt',1449)]:
-        lines=(Path(REG['target_root'])/'augseg_inputs'/rel).read_text().splitlines();require(len(lines)==n,'split count mismatch')
-        for line in lines:
-            for item in line.split():
-                candidate=root/item.lstrip('/')
-                require(candidate.is_file(),'referenced dataset file missing '+item)
-    return {'inputs':'HASH_AND_EXISTENCE_VERIFIED','dataset_full_hash':'UNKNOWN'}
+    referenced=set();records={v['destination']:v for v in info['files']}
+    for rel,archive_path,n in SPLIT_SPECS:
+        path=Path(REG['target_root'])/'augseg_inputs'/rel
+        require(str(path) in records and records[str(path)]['archive_path']==archive_path,'split destination/manifest mismatch')
+        lines=path.read_text().splitlines();require(len(lines)==n,'split count mismatch: '+rel)
+        ids=[line.strip() for line in lines]
+        require(all(re.fullmatch(r'[0-9]{4}_[0-9]{6}',item) for item in ids),'invalid VOC split ID: '+rel)
+        require(len(set(ids))==len(ids),'duplicate VOC split ID: '+rel)
+        for item in ids:
+            # BaseDataset.parse_input_list constructs BOTH paths for every stream,
+            # including the unlabeled stream. Do not treat an ID as a filename.
+            for folder,extension in [('JPEGImages','.jpg'),('SegmentationClassAug','.png')]:
+                candidate=root/folder/(item+extension)
+                require(candidate.is_file(),'referenced dataset file missing '+str(candidate.relative_to(root)))
+            referenced.add(item)
+    return {'inputs':'HASH_AND_EXISTENCE_VERIFIED','unique_images':len(referenced),'unique_masks':len(referenced),'dataset_full_hash':'UNKNOWN'}
+
+def upgrade_input_paths():
+    """Explicit config-only upgrade for an already bootstrapped, unstarted cohort.
+
+    Check all local and remote collisions before writing any config. Back up old
+    bytes separately; never change source pins, IDs, environment or input bytes.
+    """
+    check_package();target_host();upgrade=read(PKG/'upgrades/input-paths-from-9882df21.json')
+    with lock():
+        pending=[]
+        for r in profiles():
+            require(read(runtime_pin(r))==source_pin(r),'runtime source pin changed')
+            for rel,h in source_pin(r)['file_hashes'].items():
+                source=Path(r['source_root'])/rel
+                require(source.is_file() and not source.is_symlink() and sha_file(source)==h,'installed source changed '+rel)
+            allowed={rel for rel in source_pin(r)['file_hashes'] if rel.endswith('.py')}
+            actual={str(p.relative_to(Path(r['source_root']))) for p in Path(r['source_root']).rglob('*.py') if 'log' not in p.relative_to(Path(r['source_root'])).parts and '__pycache__' not in p.relative_to(Path(r['source_root'])).parts}
+            require(actual==allowed,'unexpected installed Python source')
+            p=Path(r['config']);require(p.is_file() and not p.is_symlink(),'installed config missing/symlink')
+            old=p.read_bytes();new=(PKG/r['package_config']).read_bytes();record=upgrade['configs'][r['method']]
+            require(hashlib.sha256(new).hexdigest()==record['new_sha256'],'upgrade new config pin mismatch')
+            require(hashlib.sha256(old).hexdigest() in (record['old_sha256'],record['new_sha256']),'unreviewed installed config; refuse overwrite')
+            if old!=new:pending.append((r,p,old,new))
+        if not pending:return {'upgrade':'ALREADY_CURRENT','configs_changed':0,'training_launched':False}
+        for r in profiles():fresh(r);remote_fresh(r)
+        backup_root=Path(REG['state_root'])/'port-upgrades/input-paths-from-9882df21'
+        backup_root.mkdir(parents=True,exist_ok=True)
+        for r,p,old,new in pending:
+            backup=backup_root/(r['method']+'.config.yaml')
+            if backup.exists():require(backup.read_bytes()==old,'upgrade backup differs')
+            else:
+                with backup.open('xb') as f:f.write(old)
+            require(p.read_bytes()==old,'installed config changed during upgrade')
+            tmp=p.with_suffix(p.suffix+'.port-upgrade-tmp')
+            with tmp.open('xb') as f:f.write(new)
+            os.replace(tmp,p)
+        return {'upgrade':'INPUT_PATHS_UPDATED','configs_changed':len(pending),'backups':str(backup_root),'source_pins_changed':False,'training_launched':False}
 def validate_environment():
     versions=read(PKG/'runtime/inventory.json')['direct_dependencies_metadata_at_packaging']
     installed={k:importlib.metadata.version(k) for k in versions}
@@ -409,9 +463,11 @@ def finalize(r):
             atomic(marker(r,'finalization_failed'),{'utc':utc(),'error_type':type(exc).__name__,'training_retry':False});raise
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('action',choices=['check-package','bootstrap','preflight','launch','finalize','verify-done']);p.add_argument('--method',choices=[r['method'] for r in profiles()]);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['check-package','check-inputs','bootstrap','upgrade-input-paths','preflight','launch','finalize','verify-done']);p.add_argument('--method',choices=[r['method'] for r in profiles()]);a=p.parse_args()
     if a.action=='check-package':result=check_package()
+    elif a.action=='check-inputs':check_package();target_host();result=inputs()
     elif a.action=='bootstrap':result=bootstrap()
+    elif a.action=='upgrade-input-paths':result=upgrade_input_paths()
     else:
         require(a.method,'one explicit method required');r=row_for(a.method);result={'preflight':preflight,'launch':launch,'finalize':finalize,'verify-done':verify_done}[a.action](r)
     print(json.dumps(result,default=str,sort_keys=True))

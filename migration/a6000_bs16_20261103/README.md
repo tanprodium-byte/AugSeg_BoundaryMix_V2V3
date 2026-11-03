@@ -14,7 +14,7 @@ The new A6000 baseline is the same-hardware comparator for the cohort's overall 
 
 Clone this branch into `/home/islabworker2/minhhb/tanvt/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01`, detach to the full migration commit SHA returned by deployment, and record `git rev-parse HEAD`. Do not run from default branch.
 
-Before an environment exists, inspect `SHA256.json`, `registry.json`, `origins.json`, `inputs.json`. `check.sh` runs CPU synthetic/mocks only; it cannot train or write remote resources.
+Before an environment exists, inspect `SHA256.json`, `registry.json`, `origins.json`, `inputs.json`. `check.sh` runs CPU synthetic/mocks only. Each test suite has a temporary working directory and an audit guard rejecting writes outside that sandbox, network connections and subprocess launches. No tests run against production deployments/state.
 
 ## Environment (explicit, separate; not run by bootstrap)
 
@@ -32,7 +32,21 @@ The saved requirements are run-associated package records, current installed met
 
 ## Inputs and bootstrap
 
-Supply dataset/splits/pretrained separately at the exact destinations in `inputs.json`; nothing downloads automatically. Full dataset hash is UNKNOWN; recorded pretrained hash comes from reviewed setup, not rehashed during export. Preflight rehashes all split/pretrained inputs and verifies every referenced path before launch.
+Supply dataset/splits/pretrained separately at the exact destinations in `inputs.json`; nothing downloads automatically. Full historical dataset hash is UNKNOWN; recorded pretrained hash comes from reviewed setup. Preflight rehashes all split/pretrained inputs, enforces 662/9920/1449 lines of VOC IDs, and checks BOTH `JPEGImages/<ID>.jpg` and `SegmentationClassAug/<ID>.png` for every labeled, unlabeled and validation ID. It does not decode images or load tensors.
+
+The immutable input archive layout is unchanged. Map its files as follows under `/home/islabworker2/minhhb/tanvt/augseg_inputs/`:
+
+| Archive member | Destination relative to augseg_inputs |
+| --- | --- |
+| `VOC2012/...` | `VOC2012/...` |
+| `splits/662/labeled.txt` | `splits/pascal/662/labeled.txt` |
+| `splits/662/unlabeled.txt` | `splits/pascal/662/unlabeled.txt` |
+| `splits/val.txt` | `splits/pascal/val.txt` |
+| `pretrained/resnet101.pth` | `pretrained/resnet101.pth` |
+
+The `pascal` directory is required by the unchanged `BaseDataset.parse_input_list` dispatch. Splits contain IDs, not image paths. Do not edit or regenerate them. Verify the incoming archive and payload checksums, unpack only into a new private staging directory, and copy byte-for-byte to the mapped destinations. If a destination exists, compare its size/SHA256 with `inputs.json`; reuse it only if identical, otherwise stop without overwriting. Existing old-path splits may remain in place. No re-archive or image/mask conversion is needed.
+
+Transfer-time archive `augseg_bs16_inputs.tar.gz` has SHA256 `4c33eb7be07909a30df85df9bdc4a8a3a2cc8b527d4d5c717e40a290c07b5862`. Its checksums attest transfer-time bytes, not historical training inputs. Archive/data/pretrained files are not in Git.
 
 ```bash
 bash migration/a6000_bs16_20261103/run.sh bootstrap
@@ -41,6 +55,30 @@ bash migration/a6000_bs16_20261103/run.sh bootstrap
 Bootstrap copies source trees/configs to `<root>/augseg_deployments/` and creates source-attestation files there; it never creates production executions or remote runs. It refuses differing existing files. The original RTX5090 source pins are preserved under historical; portable checks use the complete SHA256 package manifest and immutable control evidence instead of159 machine-local protected paths.
 
 Configure credentials outside Git at `<root>/augseg_auth/credentials.env`, owned by the caller with mode600 (or set AUGSEG_AUTH_FILE). Use existing account credentials; never paste them into configs or logs. `WANDB_API_KEY` and an existing HF_TOKEN/HUGGINGFACE_TOKEN/HUGGING_FACE_HUB_TOKEN are read only from that injection. Online mode is mandatory, with bounded read retries and no offline fallback.
+
+## Upgrade an existing bootstrap from 9882df21 (no environment/bootstrap redo)
+
+Commit `9882df210b273cffe09edc37d864f44cddb9dcaf` had two operational port bugs: split paths did not contain `pascal`/`VOC`, and input preflight treated each ID as a direct filename. This correction changes only those paths/guards and isolated tests. All scientific source hashes, historical evidence/pins, input bytes/checksums, registry identities, batch/budget and source-pin hashes are unchanged.
+
+On A6000, require a clean package checkout. Fetch the existing migration branch and detach to the NEW FULL COMMIT SHA supplied with this release; do not reset/stash or discard local edits. Keep the existing interpreter/environment and inputs archive.
+
+```bash
+git status --short
+git fetch origin migration/s-ablation-bs16-a6000-20261103
+git checkout --detach <NEW_FULL_COMMIT_SHA>
+export AUGSEG_PYTHON=/home/islabworker2/minhhb/tanvt/envs/augseg-bs16/bin/python
+bash migration/a6000_bs16_20261103/check.sh
+bash migration/a6000_bs16_20261103/run.sh upgrade-input-paths
+# Supply/reuse inputs at the mapped destinations above, with pinned bytes.
+bash migration/a6000_bs16_20261103/run.sh check-inputs
+bash migration/a6000_bs16_20261103/run.sh preflight --method baseline_augseg
+```
+
+`upgrade-input-paths` is an explicit operational action, not training. It takes the existing cohort lock, verifies source/pins and the old/new config hashes recorded in `upgrades/input-paths-from-9882df21.json`, then checks freshness for ALL four IDs/outputs/logs/markers and scoped W&B/HF collisions BEFORE any config replacement. Authentication/remote errors hold the upgrade. A running/started/completed execution, unexpected config or changed scientific source/pin also holds it; do not delete artifacts to bypass this check.
+
+When all guards pass, it backs up old config bytes under `<state_root>/port-upgrades/input-paths-from-9882df21/` and atomically updates only pending configs. It preserves environment, IDs, source pins and historical attestation; rerunning an already-current upgrade is a no-op. It never launches/finalizes/uploads. Do not rerun the ordinary bootstrap to overwrite an existing deployment.
+
+`check-inputs` is read-only, requires no credentials, and does not query GPU or remote APIs. Preflight retains the existing resource/remote guards. These preparation checks do not authorize or start production.
 
 ## Explicit production commands, in registered order (NOT executed during preparation)
 

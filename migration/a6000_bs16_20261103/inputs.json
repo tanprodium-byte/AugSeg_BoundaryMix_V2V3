@@ -8,32 +8,36 @@
     ],
     "sha256": "UNKNOWN; no full dataset manifest",
     "size": "UNKNOWN; dataset not scanned",
-    "source": "/home/jupyter-ytvn/SSS/data/VOC2012"
+    "source": "/home/jupyter-ytvn/SSS/data/VOC2012",
+    "archive_path": "VOC2012"
   },
   "files": [
     {
-      "destination": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/662/labeled.txt",
+      "destination": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/662/labeled.txt",
       "hash_evidence": "rehash at packaging; matches reviewed setup pin",
       "historical_training_input_attestation": "UNKNOWN",
       "sha256": "7dada8ccc5eb6309b4b81e172dfc24f0d83ea72078675083778ca10487182748",
       "size": 7944,
-      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/662/labeled.txt"
+      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/662/labeled.txt",
+      "archive_path": "splits/662/labeled.txt"
     },
     {
-      "destination": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/662/unlabeled.txt",
+      "destination": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/662/unlabeled.txt",
       "hash_evidence": "rehash at packaging; matches reviewed setup pin",
       "historical_training_input_attestation": "UNKNOWN",
       "sha256": "49b06340ca1534c3f15001ea9ce6d2815dd2ae1302390cfbdcfc0b004e17d960",
       "size": 119040,
-      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/662/unlabeled.txt"
+      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/662/unlabeled.txt",
+      "archive_path": "splits/662/unlabeled.txt"
     },
     {
-      "destination": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/val.txt",
+      "destination": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/val.txt",
       "hash_evidence": "rehash at packaging; matches reviewed setup pin",
       "historical_training_input_attestation": "UNKNOWN",
       "sha256": "cdc1326d12f69ce5153aa5da04a4d8783e146868d42d19f82f44e74b97ac907d",
       "size": 17388,
-      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/val.txt"
+      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/val.txt",
+      "archive_path": "splits/val.txt"
     },
     {
       "destination": "/home/islabworker2/minhhb/tanvt/augseg_inputs/pretrained/resnet101.pth",
@@ -41,9 +45,10 @@
       "historical_training_input_attestation": "UNKNOWN",
       "sha256": "d25b500a332e97a7bcbc11dc1153ec07c2f5c8334fbac2b36d882fe78a01af98",
       "size": 179202351,
-      "source_path": "/home/jupyter-ytvn/SSS/src/networks/pretrained/resnet101.pth"
+      "source_path": "/home/jupyter-ytvn/SSS/src/networks/pretrained/resnet101.pth",
+      "archive_path": "pretrained/resnet101.pth"
     }
   ],
   "split_contents_not_committed": true,
-  "unlabeled_list": "inputs/splits/662/unlabeled.txt must contain 9920 lines; loader620 with batch16"
+  "unlabeled_list": "augseg_inputs/splits/pascal/662/unlabeled.txt must contain 9920 lines; loader620 with batch16"
 }

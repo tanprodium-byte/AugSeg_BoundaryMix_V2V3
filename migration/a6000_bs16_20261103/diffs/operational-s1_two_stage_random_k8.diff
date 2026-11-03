@@ -9,7 +9,7 @@
 -    data_root: ./data/VOC2012
 -    data_list: ./data/splitsall/pascal_u2pl/662/labeled.txt
 +    data_root: /home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012
-+    data_list: /home/islabworker2/minhhb/tanvt/augseg_inputs/splits/662/labeled.txt
++    data_list: /home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/662/labeled.txt
      batch_size: 16
      flip: true
      rand_resize:
@@ -20,7 +20,7 @@
 -    data_root: ./data/VOC2012
 -    data_list: ./data/splitsall/pascal_u2pl/val.txt
 +    data_root: /home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012
-+    data_list: /home/islabworker2/minhhb/tanvt/augseg_inputs/splits/val.txt
++    data_list: /home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/val.txt
      batch_size: 1
    n_sup: 662
    workers: 4
