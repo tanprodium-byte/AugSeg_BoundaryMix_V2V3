@@ -75,6 +75,10 @@ class PortableChecks(unittest.TestCase):
    with self.assertRaisesRegex(AssertionError,'PACKAGE_FILE_SET'):m.verify_package(b)
  def test_14_no_new_augmentation_or_sampling_randomness_in_port(self):
   eq=m.load('scientific_equivalence.json');self.assertEqual(eq['science_changes'],[]);self.assertTrue(eq['receiver_and_donor_plans_byte_identical']);self.assertTrue(eq['recipe_byte_identical'])
+ def test_17_full_validation_beyond_receiver_subset_required(self):
+  with tempfile.TemporaryDirectory() as td:
+   b,root,cp=self.payload_fixture(td)
+   with patch.object(m,'validate_lists',return_value={'val':{'receiver','unselected_validation'}}),self.assertRaisesRegex(AssertionError,'INCOMPLETE_REQUIRED'):m.check_inputs(b)
  def test_16_transfer_member_safety(self):
   from transfer_inputs import safe_member
   self.assertTrue(safe_member('augseg_inputs/VOC2012/JPEGImages/id.jpg'))

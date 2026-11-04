@@ -43,8 +43,10 @@
     },
     "input_payload_manifest_sha256": {
       "source": "932c3b5eeb7f5f7db5fbb5e364ccbfc3a5d7d3280f3156a5101c10cfb4d2652c",
-      "portable": "acaf9e1c7c1095e7a63ed1655e0b4b47a0e5b8411e3ba1786a18315855277ae4"
+      "portable": "4bba9eab9e3263e0060d3cbc2006455de6e4f7ee0837f9cccb47a16caf0dd12f"
     }
   },
-  "science_changes": []
+  "science_changes": [],
+  "original4766_payload_checksums_unchanged": true,
+  "additional_validation_image_mask_files": 850
 }

@@ -2,9 +2,9 @@
   "state": "PREPARED_NOT_RUN",
   "host": "supermaster",
   "user": "jupyter-iec2024iot04",
-  "tests_total": 33,
+  "tests_total": 34,
   "synthetic_replay_tests": 17,
-  "portable_fixture_tests": 16,
+  "portable_fixture_tests": 17,
   "failures": 0,
   "CUDA_context_initialized": false,
   "real_model_validation_run": false,
@@ -12,11 +12,13 @@
   "source_Git_object_files_exact": 29,
   "run_loop_ast_identical_except_static_paths_and_CPU_test_package_guard": true,
   "checkpoint_verify_AST_path_only_change": true,
-  "input_manifest_rows": 4766,
+  "input_manifest_rows": 5616,
   "input_manifest_payload_hashes_unchanged": true,
   "python_syntax_files": 37,
   "bash_syntax": "PASS",
   "A6000_accessed": false,
   "no_dependencies_installed": true,
-  "historical_source_manifest_sha256": "0d571a29a4e099dc6ac9c80c1764ed06894e65d5c45246a7df2bcbfbf8f246f4"
+  "historical_source_manifest_sha256": "0d571a29a4e099dc6ac9c80c1764ed06894e65d5c45246a7df2bcbfbf8f246f4",
+  "original_payload_hashes_preserved": 4766,
+  "additional_current_validation_file_checksums": 850
 }

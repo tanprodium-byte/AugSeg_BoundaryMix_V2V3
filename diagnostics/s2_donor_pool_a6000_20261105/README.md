@@ -35,8 +35,8 @@ with strict `assign=True`, preserving exact teacher bytes rather than silently c
 `inputs.json` specifies source paths, exact target paths, sizes and SHA256. Do not reconstruct lists.
 
 - Dataset root: `/home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012`.
-  Required4766 files:2383 JPEGImages/ID.jpg +2383 SegmentationClassAug/ID.png, including all1449
-  validation images and the934 scheduled unique donors. `input_payload_hashes.csv` contains only
+  Required5616 files:2808 JPEGImages/ID.jpg +2808 SegmentationClassAug/ID.png, including all1449
+  validation images and the1359 scheduled unique donors. `input_payload_hashes.csv` contains only
   relative paths, sizes and SHA256; no images/masks. Existing full VOC2012 can be reused if checks pass.
 - Labeled lists: `augseg_inputs/splits/pascal/{662,1323,2646}/labeled.txt`;
   validation: `augseg_inputs/splits/pascal/val.txt`. Counts/checksums are checked, then nesting,
@@ -117,7 +117,7 @@ Private input archive creation (source host only, outside every Git checkout):
 ```bash
 python -B diagnostics/s2_donor_pool_a6000_20261105/transfer_inputs.py --output <NEW_PRIVATE_TRANSFER_DIRECTORY>
 ```
-The archive contains only the4771 required input files (4766 images/masks,4 lists,1 checkpoint),
+The archive contains only the5621 required input files (5616 images/masks,4 lists,1 checkpoint),
 with payload_manifest.json, SHA256SUMS and archive_receipt.json alongside. Transfer them privately,
 verify `sha256sum -c SHA256SUMS` at the receiver, then extract to a NEW private staging directory,
 not over production files. Map relative `augseg_inputs/...` and `augseg_diagnostic_inputs/...` to the

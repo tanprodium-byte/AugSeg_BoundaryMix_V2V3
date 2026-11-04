@@ -1,0 +1,10 @@
+{
+  "reason": "Original replay manifest covered only1024 held-out receivers, not all1449 validation images required to verify the designated teacher. Add425 validation IDs/850 files; no receiver/donor plan or scientific recipe change.",
+  "original_payload_files": 4766,
+  "added_validation_files": 850,
+  "total_payload_files": 5616,
+  "unique_image_IDs": 2808,
+  "scheduled_unique_donor_IDs": 1359,
+  "validation_IDs": 1449,
+  "historical_input_training_attestation": "UNKNOWN; added checksums are current preparation bytes"
+}
