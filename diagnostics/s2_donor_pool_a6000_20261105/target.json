@@ -1,0 +1,7 @@
+{
+  "root": "/home/islabworker2/minhhb/tanvt",
+  "output": "/home/islabworker2/minhhb/tanvt/augseg_diagnostics/s2_donor_pool_replay_a6000_20261105",
+  "python": "/home/islabworker2/minhhb/tanvt/envs/augseg-bs16/bin/python",
+  "host": "islab-server2",
+  "user": "islabworker2"
+}

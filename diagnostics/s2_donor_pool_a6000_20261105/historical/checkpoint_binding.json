@@ -1,0 +1,44 @@
+{
+  "PASS": true,
+  "checkpoint_path": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/ckpt_best.pth",
+  "checkpoint_bytes": 715095449,
+  "checkpoint_sha256": "5edd26a05f65bf1010409306c0da18f88f290f0a4e46eb0ce89787cfff1d07c0",
+  "run_id": "legacy5090_33aad027a10538589c67daa0",
+  "saved_next_epoch": 71,
+  "embedded_manifest_epoch": 70,
+  "teacher_best_epoch": 70,
+  "teacher_miou_percent": 75.20909874915435,
+  "teacher_state_sha256": "a36002da4007bde64211626a1ab1ce46a47b38870d976dc0236e54a6cad6cb53",
+  "student_state_sha256_for_distinction": "4b03271729af6ddaa41c93e766f5789b115f3465caa2b5f1b54fe9649cb2d4ba",
+  "teacher_tensor_keys": 693,
+  "source_commit": "3cf5e66c4479532de813e4236649fbeea8e27421",
+  "source_config_constructor_defaults": [
+    {
+      "field": "net.decoder.kwargs.in_planes",
+      "checkpoint": 2048,
+      "resolved_log": null
+    },
+    {
+      "field": "net.decoder.kwargs.num_classes",
+      "checkpoint": 21,
+      "resolved_log": null
+    },
+    {
+      "field": "net.decoder.kwargs.sync_bn",
+      "checkpoint": true,
+      "resolved_log": null
+    },
+    {
+      "field": "net.encoder.kwargs.sync_bn",
+      "checkpoint": true,
+      "resolved_log": null
+    }
+  ],
+  "strict_CPU_model_state_load_passed": true,
+  "state_restore_assign": true,
+  "preserves_checkpoint_buffer_dtype": "115 EMA num_batches_tracked buffers are float32 in checkpoint; default copy would cast to int64; assign preserves exact bytes",
+  "teacher_loaded_for_inference": false,
+  "validation_status": "NOT_RUN",
+  "optimizer_object_created": false,
+  "optimizer_state_loaded_into_optimizer": false
+}

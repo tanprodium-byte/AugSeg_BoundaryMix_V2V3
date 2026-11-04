@@ -1,0 +1,339 @@
+--- historical/common.py
++++ portable/common.py
+@@ -3,7 +3,9 @@
+ from pathlib import Path
+ import numpy as np
+ import torch
+-P=Path(__file__).resolve().parent;sys.path.insert(0,str(P/'source'))
++C=Path(__file__).resolve().parent
++P=Path(os.environ.get('DIAGNOSTIC_OUTPUT',json.loads((C/'target.json').read_text())['output'])).resolve()
++sys.path.insert(0,str(C/'source'))
+ from util.boundary_mix import cut_mix_label_adaptive_with_mask, _rand_bbox
+ from util.saliency_cutmix import get_saliency_component_guided_masks
+ NAMES=['background','aeroplane','bicycle','bird','boat','bottle','bus','car','cat','chair','cow','diningtable','dog','horse','motorbike','person','pottedplant','sheep','sofa','train','tvmonitor']
+@@ -37,25 +39,17 @@
+  return h.hexdigest()
+ def model_hashes(model):return {'parameters':state_sha(model.named_parameters()),'buffers':state_sha(model.named_buffers())}
+ def resource_check():
+- plan=json.loads((P/'plan.json').read_text());pol=plan['resource_policy']
++ plan=json.loads((C/'plan.json').read_text());pol=plan['resource_policy']
+  q=subprocess.check_output(['nvidia-smi','--id=0','--query-gpu=index,uuid,name,memory.total,memory.used,memory.free,utilization.gpu','--format=csv,noheader,nounits'],text=True,timeout=10).strip().split(', ')
+  procs=subprocess.check_output(['nvidia-smi','--id=0','--query-compute-apps=pid,used_memory','--format=csv,noheader,nounits'],text=True,timeout=10).strip().splitlines()
+  disk=shutil.disk_usage(P).free
+  r={'checked_unix':time.time(),'gpu_index':int(q[0]),'uuid':q[1],'gpu_name':q[2],'gpu_total_mib':int(q[3]),'gpu_used_mib':int(q[4]),'gpu_free_mib':int(q[5]),'gpu_utilization':int(q[6]),'compute_processes_informational':procs,'disk_free_bytes':disk,'disk_free_GiB':disk/1024**3,'policy':pol,'gpu_pass':int(q[5])>=pol['min_gpu_free_mib'],'disk_pass':disk>=pol['min_disk_free_bytes']};r['ready']=r['gpu_pass'] and r['disk_pass'];return r
+ 
+ def check_pins(check_inputs=True):
+- plan=json.loads((P/'plan.json').read_text());assert sha_file(P/'source_manifest.json')==plan['source_manifest_sha256']
+- for rel,h in json.loads((P/'source_manifest.json').read_text()).items():assert sha_file(P/'source'/rel)==h,rel
+- for f,k in [('receiver_plan.csv','receiver_plan_sha256'),('donor_plan.csv','donor_plan_sha256'),('input_payload_hashes.csv','input_payload_manifest_sha256')]:assert sha_file(P/f)==plan[k],f
+- if (P/'runner_manifest.json').exists():
+-  for f,h in json.loads((P/'runner_manifest.json').read_text()).items():assert sha_file(P/f)==h,f
+- if (P/'checkpoint_pin.json').exists():assert sha_file(plan['checkpoint'])==json.loads((P/'checkpoint_pin.json').read_text())['checkpoint_sha256'],'checkpoint pin mismatch'
+- if check_inputs:
+-  assert (P/'augmentation_pin.json').exists(),'CPU augmented-input pin missing'
+-  assert sha_file(P/'augmented_input_hashes.csv')==json.loads((P/'augmentation_pin.json').read_text())['sha256']
+-  for r in csv.DictReader(open(P/'input_payload_hashes.csv')):assert Path(r['path']).stat().st_size==int(r['size_bytes']) and sha_file(r['path'])==r['sha256'],r['path']
+- for r in json.loads((P/'locked_lists.json').read_text())['list_file_evidence']:assert sha_file(r['realpath'])==r['sha256_current']
+- return {'source_pins':True,'runner_pins':True,'plan_inputs':True,'payload_bytes_rechecked':check_inputs}
++ from portable import verify_package, check_inputs as verify_inputs
++ verify_package(C)
++ if check_inputs:verify_inputs(C)
++ return {'source_pins':True,'runner_pins':True,'plan_inputs':check_inputs,'payload_bytes_rechecked':check_inputs}
+ 
+ def shadow_reference(ref):
+  b,h,w=ref.shape;ix=ref.clone().long();ix[ix==255]=21
+--- historical/runner.py
++++ portable/runner.py
+@@ -45,7 +45,7 @@
+  return torch.stack(xs),torch.stack(strong) if is_receiver else None,torch.stack(ys)
+ 
+ def run():
+- plan=json.loads((P/'plan.json').read_text());cfg=json.loads((P/'recipe.json').read_text())
++ plan=json.loads((C/'plan.json').read_text());cfg=json.loads((C/'recipe.json').read_text())
+  if (P/'status.json').exists() and json.loads((P/'status.json').read_text()).get('state')=='COMPLETED':
+   print('Already completed; no replay',flush=True);return 0
+  if any((P/f).exists() for f in ['batch_counts.csv','class_batch_counts.csv','pseudo_confusion.csv']):raise RuntimeError('EXISTING_DIAGNOSTIC_OBSERVATIONS: no automatic replay/retry')
+@@ -57,6 +57,7 @@
+  for f in ['batch_counts.csv','class_batch_counts.csv','pseudo_confusion.csv']:
+   if (P/f).exists():raise RuntimeError('EXISTING_DIAGNOSTIC_OBSERVATIONS: no automatic replay/retry')
+  if not (P/'cpu_tests.json').is_file() or not json.loads((P/'cpu_tests.json').read_text())['passed']:raise RuntimeError('CPU_TESTS_REQUIRED')
++ assert json.loads((P/'cpu_tests.json').read_text())['package_manifest_sha256']==sha_file(C/'package_manifest.json'),'CPU_TEST_PACKAGE_MISMATCH'
+  binding=verify_checkpoint();expected_sha=binding['checkpoint_sha256'];assert sha_file(plan['checkpoint'])==expected_sha
+  # No CUDA initialization/model import before the resource gate.
+  torch.cuda.set_device(0);torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False;torch.backends.cudnn.benchmark=False;torch.backends.cudnn.deterministic=True;torch.set_num_threads(2);seed_cpu(2)
+@@ -68,8 +69,8 @@
+  put('teacher_state_before.json',before);put('runtime.json',{'torch':torch.__version__,'cuda_runtime':torch.version.cuda,'cudnn':torch.backends.cudnn.version(),'device':torch.cuda.get_device_name(0),'FP32':True,'AMP':False,'TF32_matmul':False,'TF32_cudnn':False,'deterministic_cudnn':True,'skip_pretrain_constructor_only':'pretrained=False; strict designated teacher_state overwrites all state','optimizer_created':False,'EMA_update':False})
+  try:
+   put('status.json',{'state':'VALIDATING','checkpoint_sha256':expected_sha});validate_teacher(model,plan,cfg,device);assert model_hashes(model)==before
+-  expected_aug={(int(r['batch']),r['role'],r['pool']):r for r in csv.DictReader(open(P/'augmented_input_hashes.csv'))}
+-  rx=list(csv.DictReader(open(P/'receiver_plan.csv')));donors=list(csv.DictReader(open(P/'donor_plan.csv')));root=Path(plan['dataset_root']);put('status.json',{'state':'REPLAYING','next_batch':0})
++  expected_aug={(int(r['batch']),r['role'],r['pool']):r for r in csv.DictReader(open(C/'augmented_input_hashes.csv'))}
++  rx=list(csv.DictReader(open(C/'receiver_plan.csv')));donors=list(csv.DictReader(open(C/'donor_plan.csv')));root=Path(plan['dataset_root']);put('status.json',{'state':'REPLAYING','next_batch':0})
+   for bi in range(64):
+    # Before every batch, preserve existing GPU/disk policy; never kill another job.
+    rr=resource_check()
+@@ -114,6 +115,8 @@
+   after=model_hashes(model);put('teacher_state_exit.json',after);assert after==before,'Teacher parameter/buffer mutation detected'
+ 
+ def main():
++ from portable import require_target, require_prepared, dependencies
++ require_target();require_prepared(C,P);dependencies()
+  parser=argparse.ArgumentParser();parser.add_argument('action',choices=['preflight','run']);args=parser.parse_args()
+  if args.action=='preflight':
+   pins=check_pins(check_inputs=True);r=resource_check();put('preflight.json',{'pins':pins,'resources':r,'model_started':False});print(json.dumps({'pins':pins,'resources':r},indent=2));return 0 if r['ready'] else 2
+--- historical/checkpoint_binding.py
++++ portable/checkpoint_binding.py
+@@ -1,10 +1,10 @@
+ """CPU-only verification of the exact designated checkpoint, never select alternatives."""
+ import gc,json
+ from pathlib import Path
+-from common import P,sha_file,state_sha,put,torch
++from common import C,P,sha_file,state_sha,put,torch
+ 
+ def verify(create_pin=False):
+- plan=json.loads((P/'plan.json').read_text());cp=Path(plan['checkpoint']);sha=sha_file(cp)
++ plan=json.loads((C/'plan.json').read_text());cp=Path(plan['checkpoint']);sha=sha_file(cp)
+  if (P/'checkpoint_binding.json').exists():assert json.loads((P/'checkpoint_binding.json').read_text())['checkpoint_sha256']==sha,'designated checkpoint bytes changed'
+  ckpt=torch.load(cp,map_location='cpu',weights_only=True)
+  assert ckpt['run_id']==plan['teacher_execution_id'],'checkpoint execution mismatch'
+@@ -19,7 +19,7 @@
+  assert c['trainer']['epochs']==80 and c['trainer']['unsupervised']['threshold']==.95 and c['trainer']['unsupervised']['loss_weight']==1
+  assert not c.get('saliency_cutmix',{}).get('enabled',False)
+  assert ckpt['args']['seed']==2
+- recipe=json.loads((P/'recipe.json').read_text());diff=[]
++ recipe=json.loads((C/'recipe.json').read_text());diff=[]
+  def flat(d,p=''):
+   if isinstance(d,dict):return {kk:vv for k,x in d.items() for kk,vv in flat(x,p+'.'+k if p else k).items()}
+   return {p:d}
+@@ -29,7 +29,7 @@
+  allowed={'net.encoder.kwargs.sync_bn':True,'net.decoder.kwargs.sync_bn':True,'net.decoder.kwargs.num_classes':21,'net.decoder.kwargs.in_planes':2048}
+  assert all(d['field'] in allowed and d['checkpoint']==allowed[d['field']] and d['resolved_log'] is None for d in diff),('unexplained recipe difference',diff)
+  from augseg.models.model_helper import ModelBuilder
+- net=json.loads((P/'recipe.json').read_text())['net'];net['encoder']['pretrain']=None;net['encoder']['kwargs']['pretrained']=False
++ net=json.loads((C/'recipe.json').read_text())['net'];net['encoder']['pretrain']=None;net['encoder']['kwargs']['pretrained']=False
+  model=ModelBuilder(net).float().eval();model.load_state_dict(ckpt['teacher_state'],strict=True,assign=True)
+  assert state_sha(model.state_dict().items())==state_sha(ckpt['teacher_state'].items())
+  assert not torch.cuda.is_initialized()
+@@ -37,10 +37,12 @@
+  result={'PASS':True,'checkpoint_path':str(cp),'checkpoint_bytes':cp.stat().st_size,'checkpoint_sha256':sha,'run_id':ckpt['run_id'],'saved_next_epoch':ckpt['epoch'],'embedded_manifest_epoch':manifest['epoch'],'teacher_best_epoch':manifest['best_epoch'],'teacher_miou_percent':manifest['miou_tea']*100,'teacher_state_sha256':state_sha(ckpt['teacher_state'].items()),'student_state_sha256_for_distinction':state_sha(ckpt['model_state'].items()),'teacher_tensor_keys':len(ckpt['teacher_state']),'source_commit':plan['source_commit'],'source_config_constructor_defaults':diff,'strict_CPU_model_state_load_passed':True,'state_restore_assign':True,'preserves_checkpoint_buffer_dtype':'115 EMA num_batches_tracked buffers are float32 in checkpoint; default copy would cast to int64; assign preserves exact bytes','teacher_loaded_for_inference':False,'validation_status':'NOT_RUN','optimizer_object_created':False,'optimizer_state_loaded_into_optimizer':False}
+  assert result['teacher_state_sha256']!=result['student_state_sha256_for_distinction']
+  pin={'checkpoint_sha256':sha,'teacher_state_sha256':result['teacher_state_sha256'],'run_id':result['run_id'],'saved_next_epoch':result['saved_next_epoch'],'source_commit':plan['source_commit']}
+- if (P/'checkpoint_pin.json').exists():assert json.loads((P/'checkpoint_pin.json').read_text())==pin,'locked checkpoint pin mismatch'
++ if (C/'checkpoint_pin.json').exists():assert json.loads((C/'checkpoint_pin.json').read_text())==pin,'locked checkpoint pin mismatch'
+  else:
+   assert create_pin,'CPU checkpoint pin must be prepared before run'
+-  with (P/'checkpoint_pin.json').open('x') as stream:json.dump(pin,stream,indent=2)
++  with (C/'checkpoint_pin.json').open('x') as stream:json.dump(pin,stream,indent=2)
+  put('checkpoint_binding.json',result);del ckpt;gc.collect();return result
+ if __name__=='__main__':
+- r=verify(create_pin=True);print(json.dumps({k:r[k] for k in ['PASS','run_id','saved_next_epoch','embedded_manifest_epoch','teacher_miou_percent','checkpoint_sha256','teacher_tensor_keys','validation_status']},indent=2))
++ from portable import require_target,verify_package,require_prepared
++ require_target();verify_package();require_prepared(C,P)
++ r=verify(create_pin=False);print(json.dumps({k:r[k] for k in ['PASS','run_id','saved_next_epoch','embedded_manifest_epoch','teacher_miou_percent','checkpoint_sha256','teacher_tensor_keys','validation_status']},indent=2))
+--- historical/analyze_replay.py
++++ portable/analyze_replay.py
+@@ -3,7 +3,8 @@
+ from collections import defaultdict
+ from pathlib import Path
+ import numpy as np
+-P=Path(__file__).resolve().parent
++C=Path(__file__).resolve().parent
++P=Path(os.environ.get('DIAGNOSTIC_OUTPUT',json.loads((C/'target.json').read_text())['output'])).resolve()
+ NAMES=['background','aeroplane','bicycle','bird','boat','bottle','bus','car','cat','chair','cow','diningtable','dog','horse','motorbike','person','pottedplant','sheep','sofa','train','tvmonitor']
+ def put(n,x):(P/n).write_text(json.dumps(x,ensure_ascii=False,indent=2,allow_nan=False)+'\n')
+ def table(n,rows):
+@@ -15,9 +16,9 @@
+ def ratio(a,b):return a/b if b else 'NA'
+ def read(name):return list(csv.DictReader(open(P/name)))
+ def hfile(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+-if (P/'runner_manifest.json').exists():
+- for name,expected in json.loads((P/'runner_manifest.json').read_text()).items():assert hfile(P/name)==expected,name
+-plan=json.loads((P/'plan.json').read_text());status=json.loads((P/'status.json').read_text()) if (P/'status.json').exists() else {'state':'NOT_RUN'};binding=json.loads((P/'checkpoint_binding.json').read_text());tests=json.loads((P/'cpu_tests.json').read_text());pre=json.loads((P/'preflight.json').read_text()) if (P/'preflight.json').exists() else {};ready=status['state']=='COMPLETED'
++from portable import verify_package
++verify_package(C)
++plan=json.loads((C/'plan.json').read_text());status=json.loads((P/'status.json').read_text()) if (P/'status.json').exists() else {'state':'NOT_RUN'};binding=json.loads((P/'checkpoint_binding.json').read_text()) if (P/'checkpoint_binding.json').exists() else json.loads((C/'historical/checkpoint_binding.json').read_text());tests=json.loads((P/'cpu_tests.json').read_text());pre=json.loads((P/'preflight.json').read_text()) if (P/'preflight.json').exists() else {};ready=status['state']=='COMPLETED'
+ profiles=[{'donor_pool':s,'recipe':r,'planned_receiver_images':1024,'planned_batches':64,'planned_batch':16,'planned_donor_slots':1024,'planned_unique_donors':plan['unique_donors'][str(s)],'observed_completed_batches':64 if ready else 'NOT_RUN_OR_INCOMPLETE','status':status['state']} for s in [662,1323,2646] for r in ['baseline','S2']];table('six_conditions.csv',profiles)
+ results_text='';pairrows=[];poolrows=[]
+ if ready:
+@@ -81,65 +82,52 @@
+ Không có per-class/per-batch replay observations để kết luận donor pool làm thay đổi supervision của class nào. Không tạo zero-filled metrics. Không có bằng chứng mới để xác nhận hoặc bác bỏ lời giải regression nhẹ hơn ởVOC2646. CPU synthetic examples là kiểm chứng runner, không phải kết quả trên frozen baseline teacher.
+ '''
+ now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7))).isoformat();resource=status.get('resources',pre.get('resources',{}));testn=tests['tests_run']
+-report=f'''# Frozen-teacher donor-pool replay — {status['state']}
++report=f'''# S2 donor-pool controlled replay — {status['state']}
+ 
+-Thời điểm báo cáo (Việt Nam): {now}. Host/user đã kiểm tra: supermaster/jupyter-iec2024iot04. Production source/config/pins, queues và services không thay đổi. Không optimizer hoặc EMA update; không W&B run/HF upload/network calls.
++Report time (Vietnam): {now}. Target binding recorded here: {(P/'checkpoint_binding.json').exists()}.
++Historical CPU binding is evidence of checkpoint identity, not target validation or replay.
++Package manifest SHA256: {hfile(C/'package_manifest.json')}.
++Source commit: {plan['source_commit']}; teacher: {plan['teacher_execution_id']}, epoch70.
++Checkpoint SHA256: {binding['checkpoint_sha256']}.
+ 
+-## Trạng thái và blocker
+-
+-**Real-model validation/replay: {'COMPLETED' if ready else 'NOT RUN / BLOCKED'}.**
+-
+-GPU free hiện ghi {resource.get('gpu_free_mib','UNKNOWN')} MiB, guard≥16384. Disk free {resource.get('disk_free_GiB','UNKNOWN')} GiB, guard≥32GiB. Dùng cùng numeric GPU/disk guard của S launcher `augseg_deployments/s2_mask_relocated_area_only_bs16_20261030/tools/s2_area_only_cohort.py:256–258`; không hạ ngưỡng hoặc cleanup dữ liệu để vượt check. Compute processes được cho phép; không tác động process khác. `preflight.json`, `resources.json`, `status.json` ghi trạng thái thực tế và timestamps.
+-
+-## Những gì đã thực hiện độc lập
+-
+-- Khóa nguồn commit `{plan['source_commit']}`, export29source files ngoài production. `source_manifest.json` giữ SHA256; không import train_semi.py.
+-- Khóa1024 receiver IDs,64batches×16 trước diagnostic metrics; receiver selection seed20261104. Labeled lists662⊂1323⊂2646 đúng hashes của audit; không trùng validation. Receiver crop/augmentation seeds trongreceiver_plan.csv dùng chung6cells.
+-- Mỗi pool1024 donor slots uniform với replacement, same donor sequence/augmented labeledRGB+GT giữa baseline/S2. Unique donor IDs thực tế đã khóa:662={plan['unique_donors']['662']},1323={plan['unique_donors']['1323']},2646={plan['unique_donors']['2646']}. Đây là counts của plan, không counts supervision sau replay.
+-- Hash4766source image/mask files của2383unique input IDs. Không copy ảnh/dataset vào package. `input_payload_hashes.csv` chỉ chứa paths,size,SHA256 hiện tại, không historical training attestation.
+-- **Checkpoint binding CPU PASS:** đúng `{binding['run_id']}`, next_epoch71 / embedded validation epoch70, embedded teacher mIoU75.20909874915435. SHA256 `{binding['checkpoint_sha256']}`. Dùng teacher_state693keys, khôngmodel_state(student); hashes khác nhau được lưu. Strict CPU architecture restore PASS, không model forward trong bước này. **Validation mIoU thật chưa được kiểm chứng lại nếu chưa có validation.json PASS.**
+-- Chi tiết representation:115 BNnum_batches_tracked làfloat32 trong checkpoint do EMA buffer updates của source; load mặc định cast sangint64. Runner dùngstrict `assign=True` để giữ nguyên tensor properties và teacher hash, không đổi kiến trúc/checkpoint/recipe. `CPU_load_representation_differences.json` ghi khác biệt này; source train_semi.py:2498–2502 giải thích EMA. Không phải chọn checkpoint khác hay sửa expected accuracy.
+-- CPU đã preprocess đủ1024receivers +3072donorslots theo source và seeds, lưu256batch-hashrows trongaugmented_input_hashes.csv; không lưu ảnh/tensors. Runner kiểm lại hashes trước từng cell.
+-- **{testn} synthetic CPU tests PASS**; source mixer/selector, RNG equivalence, reference independence, donor alignment/two-stage transport, one-stage relocation, ignore255, inclusive threshold.95, CE/BHW, count conservation, NA denominator, frozen teacher/BN, exact buffer dtype restore và resource fail-stop. CUDA context không được khởi tạo bởi tests. Test harness lầnđầu thiếu explicit import `_rand_bbox`, đã sửa riêng test; source production không thay đổi.
+-
+-## Sáu điều kiện đã khóa
+-
++## Design and status
++FP32, no AMP/TF32, C321, B16,64 shared receiver batches,1024 fixed held-out images.
++Three nested donor pools, uniform with replacement; baseline two-stage versus S2 one-stage
++exact-mask relocated saliency×area selection. No optimizer/EMA, training entrypoint, network,
++W&B run or HF upload. Teacher parameters/buffers must match before/after.
++Actual validation must match75.20909874915435% within0.0001pp before replay; never relax automatically.
++Resource readings are timestamped observations, not a future capacity guarantee: {resource}.
+ {mdtable(profiles)}
+ 
+-## Runner và đo lường
++{results_text}
++## Definitions and interpretation
++Raw per-class counts use reference/content class, not mean class ID.
++N=BHW. Mass=count/N; conditional ratios use their explicit denominators; denominator0 is NA.
++Valid reference=valid GT-origin+correct active pseudo+wrong active pseudo+valid filtered.
++Ignored reference=GT-ignore+pseudo reference-ignore active+pseudo reference-ignore filtered.
++Active CE=valid GT-origin+correct active pseudo+wrong active pseudo+pseudo reference-ignore active.
++Receiver GT never determines predictions/gate/selection. Baseline carries provenance through both stages.
++Removed original-receiver supervision is not a corrected prediction of the same content.
++Read all21 classes, including losses of correct pseudo supervision and gains of GT supervision.
++Paired recipe deltas and difference-of-deltas use the same64 receiver batches; bootstrap units
++are batches, not pixels or training seeds. These are allocation measurements, not historical
++training masks, donor repetition effects, learning utility or proof of the mIoU mechanism.
+ 
+-`runner.py` dùngsource ModelBuilder/helper đãexport. Model eval,FP32,noautocast/TF32,allparameters frozen; saliency gradient chỉ theo labeled input RGB, không cache saliency theo ảnh. Validation dùngrecipe gốc nativeimage/batch1 để kiểm tra checkpoint; replay mới dùngC321/B16. Bỏ pretrain constructor vì strict teacherstate ghi đè đủ keys, không auto-download/resume. Validation threshold đã khóa trước:absΔ≤0.0001pp; mismatch dừng, không thay tolerance/checkpoint.
+-
+-Baseline dùng2stages, gate mean[q(1−normalizedentropy)] vớiuniform>score. S2 dùng1stage exact component-mask relocated,score saliency×area,T.2,eligibility/fallbackrectangle nguyên gốc; khôngsamplegate/CSL/BCR. Selector exception dừng controlled comparison và ghi lỗi, không âm thầm cộng fallbackhai bước vào S2.
+-
+-ReferenceGT chỉ là side-channel observational qua optional `unlabeled_probs`, không dùng để tính pseudo/gate/saliency/loss. One-hot22channels (21class+ignore) vàcontentID đượctransport bởi chính helpergốc; GTorigin lấy từmask gốc sau cảhai mixingstages. GTreference của pixelGT lấy đúng labeled target; pseudo-origin lấy reference đượctransport. CPU encoded-RGB tests kiểm alignment độc lập. Profiling chỉ ghireturnlocals vàrandom draws đãcó; tests xác nhậnkhông đổi outputs/RNG.
+-
+-Một weak-teacher forward cho mỗi receiver batch, dùng lại cachedq/pseudo/gate cho6cells; hashes kiểm receiver inputs/predictions chung và donorinputs của từng cặp. Plans lưu RNGseeds; không ép cùngmask/permutation nếu thay source law. Per-component records gồm actual candidate score/probability, selectedclass/area, entropy, n0fallback vàexception riêng. Source/probe computation được giữ nguyên.
+-
+-Counts theo true/referenceclass0–20 vàtargetclass riêng:GTvalid,correctactivepseudo,wrongactivepseudo,validfiltered. GT-ignore,reference-ignoreactivepseudo vàreference-ignorefiltered được tách riêng. N=BHW; mass/N vàconditionalcoverage/error có mẫu sốghi rõ; denominator0→NA. Đếm loại bỏ originalreceiversupervision không được gọi là sửa dự đoán sai của cùngnội dung.
+-
+-Conservation:validref=GTvalid+correctpseudoactive+wrongpseudoactive+validfiltered;ignoreref=GTignore+pseudoignorerefactive+pseudoignorereffiltered;N=validref+ignoreref;activeCE=GTvalid+correctpseudoactive+wrongpseudoactive+pseudoignorerefactive.
+-
+-{results_text}
+-## Giới hạn diễn giải
+-
+-Training reference bestteacher gains+0.0658/−0.0279/+0.4128pp không phải diagnostic results. Replay không tái tạo actual historical masks, donor repetition, optimization trajectory hoặc learning utility. Nếu chạy đủ, paired deltas phải so S2−baseline trongmỗipool rồi so difference-of-deltas giữacácpools, đủ21class. Bootstrap resample64pairedreceiverbatches chung mọiđiềukiện (2000draws,seed20261106), không coi pixels làindependent hoặc diagnosticbatches làtrainingseeds.
+-
+-## Bước tiếp theo duy nhất
+-
+-{'Đọc đủ21classpaired_recipe_deltas.csv vàpaired_pool_differences.csv, gồm mấtcorrectpseudo vàtăngGTmass; chỉ tiếp tục donor-distribution explanation nếu khácbiệt có kiểmsoát phùhợpclasspatterns. Không mở thêm training ablation trong diagnostic.' if ready else 'Khôi phục đủ dung lượng≥32GiB trên filesystem này bằng quy trình do người dùng quản lý, rồi chạy lại đúng preflight và runner dưới đây. Không có cơ sở để đề xuất training ablation từ diagnostic chưa chạy.'}
+-
++## Commands (no automatic restart)
+ ```bash
+-bash {P}/run.sh preflight
+-bash {P}/run.sh run
+-bash {P}/run.sh analyze
++bash {C}/run.sh preflight
++bash {C}/run.sh run
++bash {C}/run.sh analyze
+ ```
+-
+-Runner chỉ tiếp tục từBLOCKED_RESOURCE khi chưa có replay observations. Nếu đãcó partialraw, nó FAIL chống tựreplay; không tựtạoattempt khác. NếuCOMPLETED, không chạy lại. Analyze/report/ZIP làaction riêng, khônggọi runner/model; lỗi đónggói không táikhởi động inference haytraining.
++A completed replay is not rerun. Partial observations block automatic retry.
++Analyze is independent and never invokes model/replay/training. Report/CSV/JSON ZIP excludes inputs.
+ '''
+ (P/'REPORT.md').write_text(report)
+-put('artifact_manifest.json',{'status':status['state'],'checkpoint_sha256':binding['checkpoint_sha256'],'plan_sha256':hfile(P/'plan.json'),'source_manifest_sha256':hfile(P/'source_manifest.json'),'real_model_diagnostic_completed':ready,'report_timestamp_vietnam':now,'production_changed':False,'no_optimizer_or_EMA':True})
+-# Package only report/code/metadata/CSVs, never checkpoint/cache/tensors/images/secrets.
++put('artifact_manifest.json',{'status':status['state'],'checkpoint_sha256':binding['checkpoint_sha256'],'plan_sha256':hfile(C/'plan.json'),'source_manifest_sha256':hfile(C/'source_manifest.json'),'real_model_diagnostic_completed':ready,'report_timestamp_vietnam':now,'production_changed':False,'no_optimizer_or_EMA':True})
++# Package only report/metadata/CSVs, never checkpoint/cache/tensors/images/secrets.
++import shutil
++for name in ['plan.json','recipe.json','source_manifest.json','source_origins.json','checkpoint_pin.json','inputs.json','target.json','scientific_equivalence.json','package_manifest.json']:
++ shutil.copyfile(C/name,P/name)
+ allow=[]
+ for f in sorted(P.iterdir()):
+  if f.is_file() and f.suffix in ['.md','.csv','.json','.py','.sh'] and f.name not in ['zip_receipt.json','SHA256.json']:allow.append(f)
+--- historical/test_cpu.py
++++ portable/test_cpu.py
+@@ -75,12 +75,12 @@
+  def test_09_resource_failure_cannot_pass(self):
+   with self.assertRaisesRegex(RuntimeError,'BLOCKED_RESOURCE'):resource_gate({'ready':False})
+  def test_10_locked_plan_and_disjoint_nested_lists(self):
+-  p=json.loads((P/'plan.json').read_text());r=list(csv.DictReader(open(P/'receiver_plan.csv')));d=list(csv.DictReader(open(P/'donor_plan.csv')));ll=json.loads((P/'locked_lists.json').read_text())['lists']
++  p=json.loads((C/'plan.json').read_text());r=list(csv.DictReader(open(C/'receiver_plan.csv')));d=list(csv.DictReader(open(C/'donor_plan.csv')))
+   self.assertEqual(len(r),1024);self.assertEqual(len({z['id'] for z in r}),1024);self.assertEqual(len(d),3072)
+-  self.assertTrue(set(ll['662']['ids'])<=set(ll['1323']['ids'])<=set(ll['2646']['ids']))
++  self.assertEqual({z['split'] for z in d},{'662','1323','2646'}) # full nested lists checked separately against external checksummed splits
+   self.assertFalse(set(z['id'] for z in r)&set(z['id'] for z in d));self.assertEqual(p['batch'],16)
+  def test_11_no_optimizer_or_training_entrypoint_calls(self):
+-  code=(P/'runner.py').read_text();tree=ast.parse(code);calls=[ast.unparse(x.func) for x in ast.walk(tree) if isinstance(x,ast.Call)]
++  code=(C/'runner.py').read_text();tree=ast.parse(code);calls=[ast.unparse(x.func) for x in ast.walk(tree) if isinstance(x,ast.Call)]
+   self.assertFalse(any(x.startswith('torch.optim.') or x.endswith('optimizer.step') for x in calls));self.assertNotIn('import train_semi',code);self.assertNotIn('wandb.init',code)
+  def test_12a_assign_restores_float_EMA_BN_counter_exactly(self):
+   m=Probe().eval();state=m.state_dict();state['bn.num_batches_tracked']=torch.tensor(123.42578125,dtype=torch.float32);m.load_state_dict(state,strict=True,assign=True)
+@@ -90,12 +90,12 @@
+  def test_12b_receiver_GT_cannot_change_augmentation_RGB(self):
+   from runner import augment_batch
+   from PIL import Image
+-  rgb=Image.fromarray(np.arange(48*64*3,dtype=np.uint8).reshape(48,64,3));a=Image.fromarray(np.zeros((48,64),dtype=np.uint8));b=Image.fromarray(np.full((48,64),255,dtype=np.uint8));rows=[{'id':'synthetic','augmentation_seed':6100000}];cfg=json.loads((P/'recipe.json').read_text())
++  rgb=Image.fromarray(np.arange(48*64*3,dtype=np.uint8).reshape(48,64,3));a=Image.fromarray(np.zeros((48,64),dtype=np.uint8));b=Image.fromarray(np.full((48,64),255,dtype=np.uint8));rows=[{'id':'synthetic','augmentation_seed':6100000}];cfg=json.loads((C/'recipe.json').read_text())
+   with patch('runner.load_image',return_value=(rgb,a)):x,sa,_=augment_batch(rows,cfg,P,True)
+   with patch('runner.load_image',return_value=(rgb,b)):y,sb,_=augment_batch(rows,cfg,P,True)
+   self.assertTrue(torch.equal(x,y));self.assertTrue(torch.equal(sa,sb))
+  def test_12c_analysis_cannot_restart_model_or_training(self):
+-  text=(P/'analyze_replay.py').read_text();tree=ast.parse(text);names=[ast.unparse(x.func) for x in ast.walk(tree) if isinstance(x,ast.Call)];self.assertFalse(any(x in ('run','runner.run') for x in names));self.assertNotIn('import runner',text);self.assertNotIn('import torch',text)
++  text=(C/'analyze_replay.py').read_text();tree=ast.parse(text);names=[ast.unparse(x.func) for x in ast.walk(tree) if isinstance(x,ast.Call)];self.assertFalse(any(x in ('run','runner.run') for x in names));self.assertNotIn('import runner',text);self.assertNotIn('import torch',text)
+  def test_12_pins_intact_and_no_CUDA_context(self):
+   self.assertTrue(check_pins(check_inputs=False)['source_pins']);self.assertFalse(torch.cuda.is_initialized())
+  def test_13_validation_mismatch_must_fail(self):
+@@ -104,7 +104,7 @@
+   class Wrong(torch.nn.Module):
+    def forward(self,x):return torch.zeros(x.shape[0],21,*x.shape[-2:]),None
+   with tempfile.TemporaryDirectory(dir=P) as td:
+-   fp=Path(td)/'val.txt';fp.write_text('synthetic\n'*1449);plan=json.loads((P/'plan.json').read_text());plan['validation_list']=str(fp);plan['expected_teacher_miou_percent']=1.;cfg=json.loads((P/'recipe.json').read_text());rgb=Image.fromarray(np.zeros((4,5,3),dtype=np.uint8));gt=Image.fromarray(np.ones((4,5),dtype=np.uint8));captured={}
++   fp=Path(td)/'val.txt';fp.write_text('synthetic\n'*1449);plan=json.loads((C/'plan.json').read_text());plan['validation_list']=str(fp);plan['expected_teacher_miou_percent']=1.;cfg=json.loads((C/'recipe.json').read_text());rgb=Image.fromarray(np.zeros((4,5,3),dtype=np.uint8));gt=Image.fromarray(np.ones((4,5),dtype=np.uint8));captured={}
+    with patch('runner.load_image',return_value=(rgb,gt)),patch('runner.put',side_effect=lambda name,data:captured.update({name:data})),contextlib.redirect_stdout(io.StringIO()):
+     with self.assertRaisesRegex(RuntimeError,'VALIDATION_MISMATCH'):validate_teacher(Wrong().eval(),plan,cfg,torch.device('cpu'))
+    self.assertFalse(captured['validation.json']['passed'])
+@@ -112,7 +112,7 @@
+   from runner import run
+   with tempfile.TemporaryDirectory(dir=P) as td:
+    root=Path(td)
+-   for name in ['plan.json','recipe.json']:(root/name).write_bytes((P/name).read_bytes())
++   for name in ['plan.json','recipe.json']:(root/name).write_bytes((C/name).read_bytes())
+    (root/'status.json').write_text(json.dumps({'state':'COMPLETED'}))
+    with patch('runner.P',root),patch('runner.verify_checkpoint',side_effect=AssertionError('must not reload')),contextlib.redirect_stdout(io.StringIO()):self.assertEqual(run(),0)
+    (root/'status.json').write_text(json.dumps({'state':'FAILED_DIAGNOSTIC'}));(root/'batch_counts.csv').write_text('partial')
+--- historical/plan.json
++++ portable/plan.json
+@@ -3,11 +3,11 @@
+   "source_commit": "3cf5e66c4479532de813e4236649fbeea8e27421",
+   "source_manifest_sha256": "0d571a29a4e099dc6ac9c80c1764ed06894e65d5c45246a7df2bcbfbf8f246f4",
+   "teacher_execution_id": "legacy5090_33aad027a10538589c67daa0",
+-  "checkpoint": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/ckpt_best.pth",
+-  "source_training_manifest": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/manifest.json",
+-  "source_training_config": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/config.yaml",
+-  "dataset_root": "/home/jupyter-ytvn/SSS/data/VOC2012",
+-  "validation_list": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/val.txt",
++  "checkpoint": "/home/islabworker2/minhhb/tanvt/augseg_diagnostic_inputs/s2_donor_pool/ckpt_best.pth",
++  "source_training_manifest": "historical checkpoint embedded manifest; see checkpoint_binding.json after target verification",
++  "source_training_config": "recipe.json; compare strictly with embedded checkpoint cfg",
++  "dataset_root": "/home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012",
++  "validation_list": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/val.txt",
+   "expected_best_epoch_zero_based": 70,
+   "expected_checkpoint_next_epoch": 71,
+   "expected_teacher_miou_percent": 75.20909874915435,
+@@ -38,7 +38,7 @@
+   },
+   "receiver_plan_sha256": "9fa2dcf6e807f3d2d6cbde5316b07c6c90a18c640c78595261465fed584e55b8",
+   "donor_plan_sha256": "1b470897f48c1e159bebdf446bb4a781fa60af893d83800e92242df496791175",
+-  "input_payload_manifest_sha256": "932c3b5eeb7f5f7db5fbb5e364ccbfc3a5d7d3280f3156a5101c10cfb4d2652c",
++  "input_payload_manifest_sha256": "acaf9e1c7c1095e7a63ed1655e0b4b47a0e5b8411e3ba1786a18315855277ae4",
+   "resource_policy": {
+     "gpu_index": 0,
+     "min_gpu_free_mib": 16384,

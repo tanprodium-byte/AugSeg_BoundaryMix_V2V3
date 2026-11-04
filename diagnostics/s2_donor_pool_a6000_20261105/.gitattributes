@@ -1,0 +1,4 @@
+# Preserve exact historical and frozen-plan bytes, including CRLF.
+source/** -text
+*.csv -text
+operational.diff -text

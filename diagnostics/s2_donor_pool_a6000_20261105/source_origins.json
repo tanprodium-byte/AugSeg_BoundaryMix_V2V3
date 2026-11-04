@@ -1,0 +1,28 @@
+{
+  "diagnostic_source_directory": "/home/jupyter-iec2024iot04/augseg_diagnostics/s2_donor_pool_replay_20261104T161524Z",
+  "historical_source_commit": "3cf5e66c4479532de813e4236649fbeea8e27421",
+  "historical_source_manifest_sha256": "0d571a29a4e099dc6ac9c80c1764ed06894e65d5c45246a7df2bcbfbf8f246f4",
+  "historical_diagnostic_file_sha256": {
+    "common.py": "3362eac129ccc3229b566f2a9caec6a5bf2b13104e5bacb9c32ee7510b2b6144",
+    "runner.py": "385e83b7c56b691552585278dfe6d7461286dc87b9ee3d8a3989f4b48847fa0b",
+    "checkpoint_binding.py": "69598082de5eb71b35fef3e0223cbdfb09268a3ee26b6fa67a597b4972b0b370",
+    "analyze_replay.py": "c71d133e03e8a8941a5707c15050f4aac95a27174551876212afaf1e9475c8ea",
+    "test_cpu.py": "0261ab6a8cfdc190e2b1bae6a3b660cbad2a8a2b51ef1641b05a80584d31eaf3",
+    "recipe.json": "b218f0050750a0af559e5e96661ada76f386fe79aef59a264cdad7546cc3b564",
+    "scientific_contract.json": "e3344512572c408736b3027f75332732d679ea37fa7eaaca62bb45502dddabd1",
+    "source_manifest.json": "0d571a29a4e099dc6ac9c80c1764ed06894e65d5c45246a7df2bcbfbf8f246f4",
+    "checkpoint_pin.json": "04cdeed8a68b8c3cd72f0ad4d423bc72015c1f62b90e2fbf65fe0f147147e5da",
+    "augmentation_pin.json": "f6b370a4dfab0dddc8bed6d069f6afa96ee41b12b8061ccc98ae3b1eb6b68fa1",
+    "augmented_input_hashes.csv": "aaa66a52d539ec7af123d88c6cc9d5364f11eaedc82db5446d44906c95e79333",
+    "receiver_plan.csv": "9fa2dcf6e807f3d2d6cbde5316b07c6c90a18c640c78595261465fed584e55b8",
+    "donor_plan.csv": "1b470897f48c1e159bebdf446bb4a781fa60af893d83800e92242df496791175",
+    "plan.json": "331b7694d810c4f9d46d52ace661826c17e9af36621ec422ba0c2a6fc59e5cfb",
+    "locked_lists.json": "41143cb29db61333f5b0de3268b8562e5a5eb644a412f4503176944599466a57",
+    "input_payload_hashes.csv": "932c3b5eeb7f5f7db5fbb5e364ccbfc3a5d7d3280f3156a5101c10cfb4d2652c",
+    "runner_manifest.json": "32947b3bf1230b1ebe3a3c8084f025e43afb97e1020bfe57ff7b4d6075bbc3c9"
+  },
+  "source_files_verified_against_local_git_objects": 29,
+  "new_package_base_commit": "c0dc163073731f03753acd2fde000b070f33322f",
+  "historical_cpu_binding_is_not_A6000_validation": true,
+  "raw_split_lists_excluded": true
+}

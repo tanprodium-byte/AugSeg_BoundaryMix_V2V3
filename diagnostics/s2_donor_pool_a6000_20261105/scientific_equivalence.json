@@ -1,0 +1,50 @@
+{
+  "historical_source_files_byte_identical": 29,
+  "unchanged_AST_functions": {
+    "common.py": [
+      "mix",
+      "select_masks",
+      "counts",
+      "shadow_reference",
+      "preserve_cpu_rng",
+      "tensor_sha",
+      "state_sha",
+      "model_hashes"
+    ],
+    "runner.py": [
+      "validate_teacher",
+      "augment_batch",
+      "load_image",
+      "resource_gate"
+    ]
+  },
+  "recipe_byte_identical": true,
+  "receiver_and_donor_plans_byte_identical": true,
+  "plan_changed_fields": {
+    "checkpoint": {
+      "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/ckpt_best.pth",
+      "portable": "/home/islabworker2/minhhb/tanvt/augseg_diagnostic_inputs/s2_donor_pool/ckpt_best.pth"
+    },
+    "source_training_manifest": {
+      "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/manifest.json",
+      "portable": "historical checkpoint embedded manifest; see checkpoint_binding.json after target verification"
+    },
+    "source_training_config": {
+      "source": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/config.yaml",
+      "portable": "recipe.json; compare strictly with embedded checkpoint cfg"
+    },
+    "dataset_root": {
+      "source": "/home/jupyter-ytvn/SSS/data/VOC2012",
+      "portable": "/home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012"
+    },
+    "validation_list": {
+      "source": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/val.txt",
+      "portable": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/val.txt"
+    },
+    "input_payload_manifest_sha256": {
+      "source": "932c3b5eeb7f5f7db5fbb5e364ccbfc3a5d7d3280f3156a5101c10cfb4d2652c",
+      "portable": "acaf9e1c7c1095e7a63ed1655e0b4b47a0e5b8411e3ba1786a18315855277ae4"
+    }
+  },
+  "science_changes": []
+}

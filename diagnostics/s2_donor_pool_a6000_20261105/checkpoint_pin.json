@@ -1,0 +1,7 @@
+{
+  "checkpoint_sha256": "5edd26a05f65bf1010409306c0da18f88f290f0a4e46eb0ce89787cfff1d07c0",
+  "teacher_state_sha256": "a36002da4007bde64211626a1ab1ce46a47b38870d976dc0236e54a6cad6cb53",
+  "run_id": "legacy5090_33aad027a10538589c67daa0",
+  "saved_next_epoch": 71,
+  "source_commit": "3cf5e66c4479532de813e4236649fbeea8e27421"
+}

@@ -1,0 +1,13 @@
+{
+  "sha256": "aaa66a52d539ec7af123d88c6cc9d5364f11eaedc82db5446d44906c95e79333",
+  "batches": 64,
+  "receiver_images": 1024,
+  "donor_slots": 3072,
+  "torch": "2.11.0+cu128",
+  "torchvision": "0.26.0+cu128",
+  "Pillow": "12.2.0",
+  "numpy": "2.4.4",
+  "source_and_seeds": "locked plan/source manifest; these are CPU augmented-input hashes, not historical training masks",
+  "CUDA_context_initialized": false,
+  "seconds": 24.96514368057251
+}

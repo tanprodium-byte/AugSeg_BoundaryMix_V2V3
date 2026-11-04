@@ -1,0 +1,54 @@
+{
+  "protocol": "s2_donor_pool_frozen_teacher_replay_v1",
+  "source_commit": "3cf5e66c4479532de813e4236649fbeea8e27421",
+  "source_manifest_sha256": "0d571a29a4e099dc6ac9c80c1764ed06894e65d5c45246a7df2bcbfbf8f246f4",
+  "teacher_execution_id": "legacy5090_33aad027a10538589c67daa0",
+  "checkpoint": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/ckpt_best.pth",
+  "source_training_manifest": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/manifest.json",
+  "source_training_config": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/config.yaml",
+  "dataset_root": "/home/jupyter-ytvn/SSS/data/VOC2012",
+  "validation_list": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/val.txt",
+  "expected_best_epoch_zero_based": 70,
+  "expected_checkpoint_next_epoch": 71,
+  "expected_teacher_miou_percent": 75.20909874915435,
+  "validation_abs_tolerance_pp": 0.0001,
+  "diagnostic_batches": 64,
+  "batch": 16,
+  "crop": [
+    321,
+    321
+  ],
+  "num_classes": 21,
+  "threshold": 0.95,
+  "precision": "float32; no autocast; TF32 disabled",
+  "receiver_selection_seed": 20261104,
+  "donor_selection_seed_common": 20261105,
+  "mix_seed_base": 6300000,
+  "relocation_context": {
+    "base_seed": 2,
+    "rank": 0,
+    "epoch": 0,
+    "iteration": "diagnostic batch index"
+  },
+  "donors_uniform_with_replacement": true,
+  "unique_donors": {
+    "662": 534,
+    "1323": 741,
+    "2646": 880
+  },
+  "receiver_plan_sha256": "9fa2dcf6e807f3d2d6cbde5316b07c6c90a18c640c78595261465fed584e55b8",
+  "donor_plan_sha256": "1b470897f48c1e159bebdf446bb4a781fa60af893d83800e92242df496791175",
+  "input_payload_manifest_sha256": "932c3b5eeb7f5f7db5fbb5e364ccbfc3a5d7d3280f3156a5101c10cfb4d2652c",
+  "resource_policy": {
+    "gpu_index": 0,
+    "min_gpu_free_mib": 16384,
+    "min_disk_free_bytes": 34359738368,
+    "compute_processes_allowed": true,
+    "source": "existing S launcher tools/s2_area_only_cohort.py:256–258; no threshold reduction"
+  },
+  "no_optimizer": true,
+  "no_ema_updates": true,
+  "no_network": true,
+  "no_training_entrypoint_import": true,
+  "notes": "New controlled replay, not actual historical masks/donor repetition/learning utility. Plans fixed before diagnostic metrics."
+}

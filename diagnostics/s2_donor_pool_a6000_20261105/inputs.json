@@ -1,0 +1,51 @@
+{
+  "dataset_root": "/home/islabworker2/minhhb/tanvt/augseg_inputs/VOC2012",
+  "dataset_source_root": "/home/jupyter-ytvn/SSS/data/VOC2012",
+  "splits": [
+    {
+      "key": "662",
+      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/662/labeled.txt",
+      "target_path": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/662/labeled.txt",
+      "bytes": 7944,
+      "sha256": "7dada8ccc5eb6309b4b81e172dfc24f0d83ea72078675083778ca10487182748",
+      "lines": 662,
+      "historical_training_attestation": "UNKNOWN; checksums locked during diagnostic preparation"
+    },
+    {
+      "key": "1323",
+      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/1323/labeled.txt",
+      "target_path": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/1323/labeled.txt",
+      "bytes": 15876,
+      "sha256": "df63f50a798512c3befb5364052733bd8bc169f609e034e9f55b5853798ead10",
+      "lines": 1323,
+      "historical_training_attestation": "UNKNOWN; checksums locked during diagnostic preparation"
+    },
+    {
+      "key": "2646",
+      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/2646/labeled.txt",
+      "target_path": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/2646/labeled.txt",
+      "bytes": 31752,
+      "sha256": "62c450787069b36d88ea7bb35895a808885720ae833bae8b9c81775731062ea1",
+      "lines": 2646,
+      "historical_training_attestation": "UNKNOWN; checksums locked during diagnostic preparation"
+    },
+    {
+      "key": "val",
+      "source_path": "/home/jupyter-ytvn/SSSS-ADA/data/CPS/pascal_voc/val.txt",
+      "target_path": "/home/islabworker2/minhhb/tanvt/augseg_inputs/splits/pascal/val.txt",
+      "bytes": 17388,
+      "sha256": "cdc1326d12f69ce5153aa5da04a4d8783e146868d42d19f82f44e74b97ac907d",
+      "lines": 1449,
+      "historical_training_attestation": "UNKNOWN; checksums locked during diagnostic preparation"
+    }
+  ],
+  "checkpoint": {
+    "source_path": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/baseline_augseg_fair80_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/ckpt_best.pth",
+    "target_path": "/home/islabworker2/minhhb/tanvt/augseg_diagnostic_inputs/s2_donor_pool/ckpt_best.pth",
+    "bytes": 715095449,
+    "sha256": "5edd26a05f65bf1010409306c0da18f88f290f0a4e46eb0ce89787cfff1d07c0"
+  },
+  "payload_manifest": "input_payload_hashes.csv",
+  "no_input_download": true,
+  "splits_and_tensors_not_in_git": true
+}

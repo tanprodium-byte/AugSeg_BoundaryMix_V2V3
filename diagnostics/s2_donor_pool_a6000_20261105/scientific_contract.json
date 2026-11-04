@@ -1,0 +1,56 @@
+{
+  "source_commit": "3cf5e66c4479532de813e4236649fbeea8e27421",
+  "S2_training_control_ids": {
+    "662": "legacy5090_ca2417d3bfd520c5ada5a091",
+    "1323": "legacy5090_cd563c11fa535d878f76df26",
+    "2646": "legacy5090_12a3e42ff6f8e1a90027ba2a"
+  },
+  "S2_resolved_saliency_config": {
+    "apply_to": "labeled_source_only",
+    "box_expand_ratio": 1.2,
+    "component_score": "mean_saliency_area",
+    "component_source": "labeled_gt",
+    "connectivity": 8,
+    "debug_log": true,
+    "detach_saliency": true,
+    "direct_confidence_gate": false,
+    "direct_labeled_mix": true,
+    "direct_paste_policy": "component_mask_random_valid_destination",
+    "enabled": true,
+    "eps": 1e-06,
+    "fallback": "random_box",
+    "foreground_only": true,
+    "ignore_label": 255,
+    "max_component_area": 20000,
+    "min_component_area": 64,
+    "mode": "component_mask",
+    "num_candidates": 8,
+    "paste_mode": "mask",
+    "saliency_loss": "supervised_ce",
+    "saliency_mode": "grad",
+    "saliency_model": "teacher",
+    "selection": "softmax",
+    "temperature": 0.2,
+    "use_saliency_conf_product": false,
+    "use_saliency_for_loss_weight": false
+  },
+  "baseline": "historical AugSeg two-stage; mean_pixel(q*(1-H/log21)); uniform>score; Beta8,2 then Beta4,4; reused permutation",
+  "S2": "historical one-stage exact component mask + random valid translation; no sample gate; saliency×area selector; random rectangle on no eligible component",
+  "loss_policy": "CE(ignore255) * 1[q>=.95] averaged BHW; unsupervised weight1; no student CE evaluated in allocation diagnostic",
+  "receiver_GT_reference": "observation only; never pseudo/gate/probe/loss policy",
+  "operational_export": "original source bytes unchanged; observational wrapper only; constructor pretrained=False then strict teacher-state assign=True; no optimizer/EMA/network",
+  "source_config_evidence": {
+    "662": {
+      "config": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/s2_saliency_component_mask_relocated_cutmix_c321_bs16_legacy_c321_rerun01_rtx5090_r101_c321_bs16x1_gbs16_seed2_attempt01/config.yaml",
+      "sha256": "4e26b19db2b45afdb17500a5d12ae32d638434b5c2a37fe377743dc015ab1a5f"
+    },
+    "1323": {
+      "config": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/s2_saliency_component_mask_relocated_cutmix_voc1323_c321_bs16_legacy_c321_rerun01_rtx5090_voc1323_r101_c321_bs16x1_gbs16_seed2_attempt01/config.yaml",
+      "sha256": "15a83e78c4831c6a2c70d5307f7f895645923a5fe3aeb126539bb31e10bc1430"
+    },
+    "2646": {
+      "config": "/home/jupyter-iec2024iot04/AugSeg_BoundaryMix_V2V3_legacy_c321_rerun01/exp_boundary_mix_v2_v3_legacy_c321_rtx5090/s2_saliency_component_mask_relocated_cutmix_voc2646_c321_bs16_legacy_c321_rerun01_rtx5090_voc2646_r101_c321_bs16x1_gbs16_seed2_attempt01/config.yaml",
+      "sha256": "7530937ca9203c430c5b5f5167e0e47905351a9488fc7943b903bcd2a5a767ad"
+    }
+  }
+}
